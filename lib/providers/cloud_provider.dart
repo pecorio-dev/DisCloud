@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -18,6 +19,7 @@ class CloudProvider extends ChangeNotifier {
   final CloudIndexService _indexService = CloudIndexService();
   final Dio _dio = Dio();
   DiscordService? _discord;
+  CancelToken? _currentCancelToken;
 
   String _currentPath = '/';
   List<CloudFile> _currentFiles = [];
@@ -26,6 +28,7 @@ class CloudProvider extends ChangeNotifier {
   double _progress = 0;
   bool _isInitialized = false;
   String? _downloadPath;
+  String? _currentOperation;
 
   String get currentPath => _currentPath;
   List<CloudFile> get currentFiles => _currentFiles;
@@ -36,6 +39,8 @@ class CloudProvider extends ChangeNotifier {
   bool get isConnected => _discord != null || _webhookManager.activeWebhooks.isNotEmpty;
   WebhookManager get webhookManager => _webhookManager;
   String? get downloadPath => _downloadPath;
+  String? get currentOperation => _currentOperation;
+  bool get canCancel => _currentCancelToken != null && !_currentCancelToken!.isCancelled;
 
   int get totalFiles => _fileSystem.totalFiles;
   int get totalFolders => _fileSystem.totalFolders;
@@ -55,6 +60,15 @@ class CloudProvider extends ChangeNotifier {
     
     _isInitialized = true;
     await _refreshCurrentDirectory();
+    notifyListeners();
+  }
+
+  void cancelCurrentOperation() {
+    _currentCancelToken?.cancel('Cancelled by user');
+    _currentCancelToken = null;
+    _status = CloudStatus.idle;
+    _progress = 0;
+    _currentOperation = null;
     notifyListeners();
   }
 
@@ -151,10 +165,9 @@ class CloudProvider extends ChangeNotifier {
     }
   }
 
-  // ==================== UPLOAD ====================
+  // ==================== UPLOAD (NON-BLOCKING) ====================
 
   Future<void> uploadFile(String name, Uint8List data, {String? mimeType}) async {
-    // Recharger les webhooks pour etre sur d'avoir la derniere config
     await _webhookManager.init();
     
     final webhooksToUse = _webhookManager.getWebhooksForUpload();
@@ -169,6 +182,8 @@ class CloudProvider extends ChangeNotifier {
 
     _status = CloudStatus.uploading;
     _progress = 0;
+    _currentOperation = 'Uploading $name';
+    _currentCancelToken = CancelToken();
     notifyListeners();
 
     try {
@@ -176,13 +191,17 @@ class CloudProvider extends ChangeNotifier {
       List<String> legacyChunkIds = [];
       
       if (hasWebhooks) {
-        // Upload vers TOUS les webhooks selectionnes
         for (int i = 0; i < webhooksToUse.length; i++) {
+          if (_currentCancelToken?.isCancelled == true) break;
+          
           final webhook = webhooksToUse[i];
           final service = DiscordService(webhookUrl: webhook.url);
           
           try {
-            final urls = await service.uploadFile(data, name,
+            final urls = await service.uploadFile(
+              data, 
+              name,
+              cancelToken: _currentCancelToken,
               onProgress: (p) {
                 _progress = (i + p) / webhooksToUse.length;
                 notifyListeners();
@@ -192,35 +211,50 @@ class CloudProvider extends ChangeNotifier {
             webhookChunks[webhook.url] = urls;
             await _webhookManager.incrementStats(webhook.url, data.length);
           } catch (e) {
-            // Log error but continue with other webhooks
+            if (e.toString().contains('cancelled')) rethrow;
             debugPrint('Failed to upload to ${webhook.name}: $e');
           }
         }
         
-        if (webhookChunks.isEmpty) {
+        if (webhookChunks.isEmpty && _currentCancelToken?.isCancelled != true) {
           throw Exception('Failed to upload to any webhook');
         }
       } else if (_discord != null) {
-        legacyChunkIds = await _discord!.uploadFile(data, name,
+        legacyChunkIds = await _discord!.uploadFile(
+          data, 
+          name,
+          cancelToken: _currentCancelToken,
           onProgress: (p) { _progress = p; notifyListeners(); },
         );
       }
 
-      await _fileSystem.addFile(
-        parentPath: _currentPath,
-        name: name,
-        size: data.length,
-        chunkIds: legacyChunkIds,
-        webhookChunks: webhookChunks,
-        mimeType: mimeType,
-      );
+      if (_currentCancelToken?.isCancelled != true) {
+        await _fileSystem.addFile(
+          parentPath: _currentPath,
+          name: name,
+          size: data.length,
+          chunkIds: legacyChunkIds,
+          webhookChunks: webhookChunks,
+          mimeType: mimeType,
+        );
+      }
 
       _status = CloudStatus.idle;
       _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       await _refreshCurrentDirectory();
     } catch (e) {
-      _errorMessage = 'Upload failed: $e';
-      _status = CloudStatus.error;
+      if (e.toString().contains('cancelled')) {
+        _status = CloudStatus.idle;
+        _errorMessage = null;
+      } else {
+        _errorMessage = 'Upload failed: $e';
+        _status = CloudStatus.error;
+      }
+      _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       notifyListeners();
     }
   }
@@ -228,14 +262,18 @@ class CloudProvider extends ChangeNotifier {
   Future<void> uploadFromUrl(String url, {String? customName}) async {
     _status = CloudStatus.downloading;
     _progress = 0;
+    _currentOperation = 'Downloading from URL';
+    _currentCancelToken = CancelToken();
     notifyListeners();
 
     try {
       final uri = Uri.parse(url);
       String fileName = customName ?? uri.pathSegments.lastOrNull ?? 'downloaded_file';
       
-      final response = await _dio.get<List<int>>(url,
+      final response = await _dio.get<List<int>>(
+        url,
         options: Options(responseType: ResponseType.bytes),
+        cancelToken: _currentCancelToken,
         onReceiveProgress: (received, total) {
           if (total > 0) { _progress = received / total * 0.5; notifyListeners(); }
         },
@@ -243,19 +281,28 @@ class CloudProvider extends ChangeNotifier {
 
       if (response.data == null) throw Exception('No data received');
       
+      _currentOperation = 'Uploading $fileName';
       _status = CloudStatus.uploading;
       _progress = 0.5;
       notifyListeners();
 
       await uploadFile(fileName, Uint8List.fromList(response.data!));
     } catch (e) {
-      _errorMessage = 'URL upload failed: $e';
-      _status = CloudStatus.error;
+      if (e.toString().contains('cancelled')) {
+        _status = CloudStatus.idle;
+        _errorMessage = null;
+      } else {
+        _errorMessage = 'URL upload failed: $e';
+        _status = CloudStatus.error;
+      }
+      _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       notifyListeners();
     }
   }
 
-  // ==================== DOWNLOAD ====================
+  // ==================== DOWNLOAD (NON-BLOCKING) ====================
 
   Future<String?> downloadToTemp(CloudFile file) async {
     final data = await _downloadFileData(file);
@@ -311,32 +358,39 @@ class CloudProvider extends ChangeNotifier {
 
     _status = CloudStatus.downloading;
     _progress = 0;
+    _currentOperation = 'Downloading ${file.name}';
+    _currentCancelToken = CancelToken();
     notifyListeners();
 
     try {
       Uint8List? data;
       
       if (hasMultiWebhooks) {
-        // Essayer chaque webhook jusqu'a reussir
         for (final entry in file.webhookChunks.entries) {
+          if (_currentCancelToken?.isCancelled == true) break;
+          
           try {
             final service = DiscordService(webhookUrl: entry.key);
-            data = await service.downloadFile(entry.value,
+            data = await service.downloadFile(
+              entry.value,
+              cancelToken: _currentCancelToken,
               onProgress: (p) { _progress = p; notifyListeners(); },
             );
-            break; // Succes!
+            break;
           } catch (e) {
+            if (e.toString().contains('cancelled')) rethrow;
             debugPrint('Download from ${entry.key} failed: $e');
-            // Continuer avec le prochain webhook
           }
         }
         
-        if (data == null) {
+        if (data == null && _currentCancelToken?.isCancelled != true) {
           throw Exception('Failed to download from any webhook');
         }
       } else if (file.chunkIds.isNotEmpty) {
         if (_discord == null) throw Exception('Not connected');
-        data = await _discord!.downloadFile(file.chunkIds,
+        data = await _discord!.downloadFile(
+          file.chunkIds,
+          cancelToken: _currentCancelToken,
           onProgress: (p) { _progress = p; notifyListeners(); },
         );
       } else {
@@ -345,11 +399,21 @@ class CloudProvider extends ChangeNotifier {
 
       _status = CloudStatus.idle;
       _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       notifyListeners();
       return data;
     } catch (e) {
-      _errorMessage = 'Download failed: $e';
-      _status = CloudStatus.error;
+      if (e.toString().contains('cancelled')) {
+        _status = CloudStatus.idle;
+        _errorMessage = null;
+      } else {
+        _errorMessage = 'Download failed: $e';
+        _status = CloudStatus.error;
+      }
+      _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       notifyListeners();
       return null;
     }
@@ -357,7 +421,6 @@ class CloudProvider extends ChangeNotifier {
 
   // ==================== CLOUD SYNC ====================
 
-  /// Exporte l'index vers Discord pour synchronisation entre appareils
   Future<bool> exportCloudIndex() async {
     if (_webhookManager.activeWebhooks.isEmpty && _discord == null) {
       _errorMessage = 'No webhook configured';
@@ -365,6 +428,7 @@ class CloudProvider extends ChangeNotifier {
     }
 
     _status = CloudStatus.syncing;
+    _currentOperation = 'Exporting index';
     notifyListeners();
 
     try {
@@ -376,19 +440,21 @@ class CloudProvider extends ChangeNotifier {
       await _indexService.exportIndex(webhookUrl, allFiles);
       
       _status = CloudStatus.idle;
+      _currentOperation = null;
       notifyListeners();
       return true;
     } catch (e) {
       _errorMessage = 'Export failed: $e';
       _status = CloudStatus.error;
+      _currentOperation = null;
       notifyListeners();
       return false;
     }
   }
 
-  /// Importe l'index depuis un JSON (copie depuis Discord)
   Future<bool> importCloudIndex(String jsonData) async {
     _status = CloudStatus.syncing;
+    _currentOperation = 'Importing index';
     notifyListeners();
 
     try {
@@ -405,13 +471,12 @@ class CloudProvider extends ChangeNotifier {
               await _fileSystem.importFile(file);
               imported++;
             }
-          } catch (e) {
-            // Skip invalid files
-          }
+          } catch (e) {}
         }
         
         await _refreshCurrentDirectory();
         _status = CloudStatus.idle;
+        _currentOperation = null;
         notifyListeners();
         return imported > 0;
       }
@@ -420,6 +485,7 @@ class CloudProvider extends ChangeNotifier {
     } catch (e) {
       _errorMessage = 'Import failed: $e';
       _status = CloudStatus.error;
+      _currentOperation = null;
       notifyListeners();
       return false;
     }
@@ -496,6 +562,8 @@ class CloudProvider extends ChangeNotifier {
 
     _status = CloudStatus.uploading;
     _progress = 0;
+    _currentOperation = 'Updating ${file.name}';
+    _currentCancelToken = CancelToken();
     notifyListeners();
 
     try {
@@ -504,40 +572,61 @@ class CloudProvider extends ChangeNotifier {
       
       if (webhooksToUse.isNotEmpty) {
         for (int i = 0; i < webhooksToUse.length; i++) {
+          if (_currentCancelToken?.isCancelled == true) break;
+          
           final webhook = webhooksToUse[i];
           final service = DiscordService(webhookUrl: webhook.url);
           
           try {
-            final urls = await service.uploadFile(newData, file.name,
+            final urls = await service.uploadFile(
+              newData, 
+              file.name,
+              cancelToken: _currentCancelToken,
               onProgress: (p) { _progress = (i + p) / webhooksToUse.length; notifyListeners(); },
             );
             webhookChunks[webhook.url] = urls;
           } catch (e) {
+            if (e.toString().contains('cancelled')) rethrow;
             debugPrint('Failed to update on ${webhook.name}: $e');
           }
         }
       } else if (_discord != null) {
-        legacyChunkIds = await _discord!.uploadFile(newData, file.name,
+        legacyChunkIds = await _discord!.uploadFile(
+          newData, 
+          file.name,
+          cancelToken: _currentCancelToken,
           onProgress: (p) { _progress = p; notifyListeners(); },
         );
       }
 
-      await _fileSystem.deleteFile(file.path);
-      await _fileSystem.addFile(
-        parentPath: _getParentPath(file.path),
-        name: file.name,
-        size: newData.length,
-        chunkIds: legacyChunkIds,
-        webhookChunks: webhookChunks,
-        mimeType: file.mimeType,
-      );
+      if (_currentCancelToken?.isCancelled != true) {
+        await _fileSystem.deleteFile(file.path);
+        await _fileSystem.addFile(
+          parentPath: _getParentPath(file.path),
+          name: file.name,
+          size: newData.length,
+          chunkIds: legacyChunkIds,
+          webhookChunks: webhookChunks,
+          mimeType: file.mimeType,
+        );
+      }
 
       _status = CloudStatus.idle;
       _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       await _refreshCurrentDirectory();
     } catch (e) {
-      _errorMessage = 'Update failed: $e';
-      _status = CloudStatus.error;
+      if (e.toString().contains('cancelled')) {
+        _status = CloudStatus.idle;
+        _errorMessage = null;
+      } else {
+        _errorMessage = 'Update failed: $e';
+        _status = CloudStatus.error;
+      }
+      _progress = 0;
+      _currentOperation = null;
+      _currentCancelToken = null;
       notifyListeners();
     }
   }

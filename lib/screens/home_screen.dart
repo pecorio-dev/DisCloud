@@ -483,21 +483,57 @@ class _HomeScreenState extends State<HomeScreen> {
     return Consumer<CloudProvider>(
       builder: (context, provider, _) {
         if (provider.status != CloudStatus.uploading &&
-            provider.status != CloudStatus.downloading) {
+            provider.status != CloudStatus.downloading &&
+            provider.status != CloudStatus.syncing) {
           return const SizedBox.shrink();
         }
 
         return Container(
           padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3),
+          ),
           child: Column(
             children: [
               Row(
                 children: [
-                  Icon(provider.status == CloudStatus.uploading ? Icons.upload : Icons.download, size: 16),
-                  const SizedBox(width: 8),
-                  Text(provider.status == CloudStatus.uploading ? 'Uploading...' : 'Downloading...'),
-                  const Spacer(),
-                  Text('${(provider.progress * 100).toInt()}%'),
+                  SizedBox(
+                    width: 16, height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      value: provider.progress > 0 ? provider.progress : null,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          provider.currentOperation ?? 
+                            (provider.status == CloudStatus.uploading ? 'Uploading...' : 'Downloading...'),
+                          style: const TextStyle(fontWeight: FontWeight.w500),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        Text(
+                          '${(provider.progress * 100).toInt()}%',
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (provider.canCancel)
+                    TextButton.icon(
+                      onPressed: () {
+                        provider.cancelCurrentOperation();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Operation cancelled')),
+                        );
+                      },
+                      icon: const Icon(Icons.close, size: 18),
+                      label: const Text('Cancel'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                    ),
                 ],
               ),
               const SizedBox(height: 8),
