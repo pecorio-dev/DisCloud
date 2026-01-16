@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/cloud_provider.dart';
 import 'providers/theme_provider.dart';
+import 'providers/download_manager.dart';
 import 'screens/setup_screen.dart';
 import 'screens/home_screen.dart';
 
@@ -18,6 +19,7 @@ class DiscordCloudApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => CloudProvider()..init()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()..init()),
+        ChangeNotifierProvider(create: (_) => DownloadManager()),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, _) {

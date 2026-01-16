@@ -1,61 +1,115 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import '../models/cloud_file.dart';
 
 class ShareLinkService {
-  static const String _prefix = 'discloud://';
+  static const String protocol = 'discloud://';
+  static const int version = 2;
 
-  static String generateShareLink(CloudFile file) {
-    if (file.chunkUrls.isEmpty) {
-      throw Exception('No download URLs available');
-    }
-
+  /// Genere un lien de partage pour un ou plusieurs fichiers
+  static String generateShareLink(List<CloudFile> files) {
     final shareData = {
-      'n': file.name,
-      's': file.size,
-      'u': file.chunkUrls,
-      'z': file.isCompressed,
+      'v': version,
+      'files': files.map((f) => _fileToShareData(f)).toList(),
     };
-
-    final jsonString = jsonEncode(shareData);
-    final encoded = base64Url.encode(utf8.encode(jsonString));
-    return '$_prefix$encoded';
+    
+    final json = jsonEncode(shareData);
+    final compressed = gzip.encode(utf8.encode(json));
+    final encoded = base64Url.encode(compressed).replaceAll('=', '');
+    
+    return '$protocol$encoded';
   }
 
-  static ShareLinkData? parseShareLink(String link) {
-    try {
-      if (!link.startsWith(_prefix)) return null;
-      final encoded = link.substring(_prefix.length);
-      final jsonString = utf8.decode(base64Url.decode(encoded));
-      final data = jsonDecode(jsonString);
+  /// Genere un lien pour un seul fichier
+  static String generateSingleLink(CloudFile file) {
+    return generateShareLink([file]);
+  }
 
-      return ShareLinkData(
-        fileName: data['n'] ?? 'unknown',
-        fileSize: data['s'] ?? 0,
-        chunkUrls: List<String>.from(data['u'] ?? []),
-        isCompressed: data['z'] ?? false,
-      );
+  static Map<String, dynamic> _fileToShareData(CloudFile file) {
+    return {
+      'n': file.name, // name
+      's': file.size, // size
+      'c': file.chunkUrls.length, // chunk count
+      'u': file.chunkUrls, // urls
+      'z': file.isCompressed, // compressed
+      'h': file.checksum, // checksum
+      'm': file.metadata, // metadata for decryption/deobfuscation
+    };
+  }
+
+  /// Parse un lien de partage
+  static ShareData? parseShareLink(String link) {
+    try {
+      if (!link.startsWith(protocol)) return null;
+      
+      var encoded = link.substring(protocol.length);
+      // Restore padding
+      while (encoded.length % 4 != 0) encoded += '=';
+      
+      final compressed = base64Url.decode(encoded);
+      final json = utf8.decode(gzip.decode(compressed));
+      final data = jsonDecode(json) as Map<String, dynamic>;
+      
+      final files = (data['files'] as List).map((f) => SharedFile(
+        name: f['n'] ?? 'file',
+        size: f['s'] ?? 0,
+        chunkCount: f['c'] ?? 1,
+        urls: List<String>.from(f['u'] ?? []),
+        isCompressed: f['z'] ?? false,
+        checksum: f['h'],
+        metadata: Map<String, dynamic>.from(f['m'] ?? {}),
+      )).toList();
+      
+      return ShareData(version: data['v'] ?? 1, files: files);
     } catch (e) {
       return null;
     }
   }
+
+  /// Genere un QR code data pour le lien
+  static String generateQRData(String link) {
+    // Pour les longs liens, on peut utiliser un raccourcisseur ou juste le lien
+    return link;
+  }
 }
 
-class ShareLinkData {
-  final String fileName;
-  final int fileSize;
-  final List<String> chunkUrls;
+class ShareData {
+  final int version;
+  final List<SharedFile> files;
+  
+  ShareData({required this.version, required this.files});
+  
+  int get totalSize => files.fold(0, (sum, f) => sum + f.size);
+  int get totalChunks => files.fold(0, (sum, f) => sum + f.chunkCount);
+  bool get hasEncryptedFiles => files.any((f) => f.metadata['encrypted'] != null);
+}
+
+class SharedFile {
+  final String name;
+  final int size;
+  final int chunkCount;
+  final List<String> urls;
   final bool isCompressed;
-
-  ShareLinkData({
-    required this.fileName,
-    required this.fileSize,
-    required this.chunkUrls,
-    required this.isCompressed,
+  final String? checksum;
+  final Map<String, dynamic> metadata;
+  
+  SharedFile({
+    required this.name,
+    required this.size,
+    required this.chunkCount,
+    required this.urls,
+    this.isCompressed = false,
+    this.checksum,
+    this.metadata = const {},
   });
-
+  
   String get formattedSize {
-    if (fileSize < 1024) return '$fileSize B';
-    if (fileSize < 1024 * 1024) return '${(fileSize / 1024).toStringAsFixed(1)} KB';
-    return '${(fileSize / 1024 / 1024).toStringAsFixed(1)} MB';
+    if (size < 1024) return '$size B';
+    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KB';
+    if (size < 1024 * 1024 * 1024) return '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
+    return '${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
+  
+  bool get isEncrypted => metadata['encrypted'] != null;
 }
