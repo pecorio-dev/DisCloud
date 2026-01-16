@@ -28,14 +28,8 @@ class SettingsScreen extends StatelessWidget {
                   subtitle: provider.isConnected 
                       ? Text('${provider.totalFiles} files, ${provider.totalFolders} folders')
                       : const Text('Not connected to Discord'),
-                  trailing: provider.isConnected
-                      ? TextButton(
-                          onPressed: () {
-                            provider.disconnect();
-                            Navigator.popUntil(context, (route) => route.isFirst);
-                          },
-                          child: const Text('Disconnect', style: TextStyle(color: Colors.red)),
-                        )
+                  trailing: provider.isConnected && provider.webhooks.length > 1
+                      ? Text('${provider.webhooks.length} webhooks', style: const TextStyle(fontSize: 12))
                       : null,
                 ),
               ),

@@ -61,7 +61,7 @@ class _SetupScreenState extends State<SetupScreen> with SingleTickerProviderStat
     });
 
     final provider = context.read<CloudProvider>();
-    final success = await provider.connect(webhookUrl);
+    final success = await provider.addWebhook(webhookUrl);
 
     setState(() => _isLoading = false);
 

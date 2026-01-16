@@ -9,6 +9,8 @@ import '../services/share_link_service.dart';
 import 'file_viewer_screen.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
+import 'webhooks_screen.dart';
+import 'sync_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -25,6 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: _buildAppBar(),
+      drawer: _buildDrawer(),
       body: Column(
         children: [
           _buildProgressBar(),
@@ -34,6 +37,97 @@ class _HomeScreenState extends State<HomeScreen> {
           _buildStatusBar(),
         ],
       ),
+    );
+  }
+
+  Widget _buildDrawer() {
+    return Consumer<CloudProvider>(
+      builder: (context, provider, _) {
+        return Drawer(
+          child: Column(
+            children: [
+              DrawerHeader(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.cloud, size: 48, color: Colors.white),
+                    const SizedBox(height: 8),
+                    const Text('DisCloud', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                    Text('${provider.webhooks.length} webhooks', style: const TextStyle(color: Colors.white70)),
+                  ],
+                ),
+              ),
+              // Webhooks list
+              Expanded(
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Text('WEBHOOKS', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey)),
+                    ),
+                    ...provider.webhooks.map((webhook) {
+                      final isSelected = webhook.id == provider.currentWebhookId;
+                      return ListTile(
+                        leading: Icon(
+                          Icons.webhook,
+                          color: isSelected ? Theme.of(context).colorScheme.primary : Colors.grey,
+                        ),
+                        title: Text(webhook.name),
+                        subtitle: Text('${webhook.fileCount} files', style: const TextStyle(fontSize: 11)),
+                        selected: isSelected,
+                        trailing: isSelected ? const Icon(Icons.check, color: Colors.green) : null,
+                        onTap: () {
+                          provider.selectWebhook(webhook.id);
+                          Navigator.pop(context);
+                        },
+                      );
+                    }),
+                    const Divider(),
+                    ListTile(
+                      leading: const Icon(Icons.add),
+                      title: const Text('Add Webhook'),
+                      onTap: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => const WebhooksScreen()));
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.manage_accounts),
+                      title: const Text('Manage Webhooks'),
+                      onTap: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => const WebhooksScreen()));
+                      },
+                    ),
+                    const Divider(),
+                    ListTile(
+                      leading: const Icon(Icons.sync),
+                      title: const Text('Auto Sync'),
+                      subtitle: Text(provider.settings['autoSyncEnabled'] == true ? 'Enabled' : 'Disabled', style: const TextStyle(fontSize: 11)),
+                      onTap: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncScreen()));
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.settings),
+                      title: const Text('Settings'),
+                      onTap: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -61,21 +155,21 @@ class _HomeScreenState extends State<HomeScreen> {
     return AppBar(
       title: Row(
         children: [
-          const Icon(Icons.cloud, size: 24),
-          const SizedBox(width: 8),
           const Text('DisCloud'),
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: provider.isConnected ? Colors.green : Colors.red,
-              borderRadius: BorderRadius.circular(12),
+          if (provider.currentWebhook != null) ...[
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primaryContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                provider.currentWebhook!.name,
+                style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.primary),
+              ),
             ),
-            child: Text(
-              provider.isConnected ? 'Connected' : 'Offline',
-              style: const TextStyle(fontSize: 10, color: Colors.white),
-            ),
-          ),
+          ],
         ],
       ),
       actions: [
@@ -85,9 +179,9 @@ class _HomeScreenState extends State<HomeScreen> {
           tooltip: 'Search',
         ),
         IconButton(
-          icon: const Icon(Icons.settings),
-          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())),
-          tooltip: 'Settings',
+          icon: const Icon(Icons.webhook),
+          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WebhooksScreen())),
+          tooltip: 'Webhooks',
         ),
       ],
     );
@@ -102,35 +196,13 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       child: Row(
         children: [
-          // Upload button
-          _ToolbarButton(
-            icon: Icons.upload_file,
-            label: 'Upload',
-            onPressed: _uploadFile,
-          ),
-          _ToolbarButton(
-            icon: Icons.create_new_folder,
-            label: 'New Folder',
-            onPressed: _createFolder,
-          ),
-          _ToolbarButton(
-            icon: Icons.link,
-            label: 'From URL',
-            onPressed: _uploadFromUrl,
-          ),
+          _ToolbarButton(icon: Icons.upload_file, label: 'Upload', onPressed: _uploadFile),
+          _ToolbarButton(icon: Icons.create_new_folder, label: 'New Folder', onPressed: _createFolder),
+          _ToolbarButton(icon: Icons.link, label: 'From URL', onPressed: _uploadFromUrl),
           const VerticalDivider(width: 16),
-          _ToolbarButton(
-            icon: Icons.checklist,
-            label: 'Select',
-            onPressed: () => setState(() => _selectionMode = true),
-          ),
-          _ToolbarButton(
-            icon: Icons.refresh,
-            label: 'Refresh',
-            onPressed: () => context.read<CloudProvider>().navigateTo(context.read<CloudProvider>().currentPath),
-          ),
+          _ToolbarButton(icon: Icons.checklist, label: 'Select', onPressed: () => setState(() => _selectionMode = true)),
+          _ToolbarButton(icon: Icons.sync, label: 'Sync', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncScreen()))),
           const Spacer(),
-          // Stats
           Consumer<CloudProvider>(
             builder: (context, provider, _) => Row(
               children: [
@@ -206,9 +278,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onTap: () => provider.navigateTo('/'),
                 child: const Padding(
                   padding: EdgeInsets.symmetric(horizontal: 8),
-                  child: Row(
-                    children: [Icon(Icons.home, size: 16), SizedBox(width: 4), Text('Root')],
-                  ),
+                  child: Row(children: [Icon(Icons.home, size: 16), SizedBox(width: 4), Text('Root')]),
                 ),
               ),
               ...parts.asMap().entries.map((entry) {
@@ -311,10 +381,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const Icon(Icons.error, color: Colors.red, size: 16),
                 const SizedBox(width: 8),
                 Expanded(child: Text(provider.errorMessage!, style: const TextStyle(color: Colors.red))),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 16),
-                  onPressed: () => provider.clearError(),
-                ),
+                IconButton(icon: const Icon(Icons.close, size: 16), onPressed: () => provider.clearError()),
               ],
             ),
           );
@@ -383,10 +450,7 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Upload from URL'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(hintText: 'https://...'),
-        ),
+        content: TextField(controller: controller, decoration: const InputDecoration(hintText: 'https://...')),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('Upload')),
@@ -552,10 +616,7 @@ class _ToolbarButton extends StatelessWidget {
         onPressed: onPressed,
         icon: Icon(icon, size: 18),
         label: Text(label, style: const TextStyle(fontSize: 12)),
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          minimumSize: Size.zero,
-        ),
+        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), minimumSize: Size.zero),
       ),
     );
   }
@@ -577,11 +638,7 @@ class _StatChip extends StatelessWidget {
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12),
-          const SizedBox(width: 4),
-          Text(value, style: const TextStyle(fontSize: 11)),
-        ],
+        children: [Icon(icon, size: 12), const SizedBox(width: 4), Text(value, style: const TextStyle(fontSize: 11))],
       ),
     );
   }
@@ -616,11 +673,7 @@ class _FileListItem extends StatelessWidget {
         dense: true,
         leading: selectionMode
             ? Checkbox(value: isSelected, onChanged: (_) => onTap())
-            : Icon(
-                file.isDirectory ? Icons.folder : _getFileIcon(file.extension),
-                color: file.isDirectory ? Colors.amber : Colors.blueGrey,
-                size: 32,
-              ),
+            : Icon(file.isDirectory ? Icons.folder : _getFileIcon(file.extension), color: file.isDirectory ? Colors.amber : Colors.blueGrey, size: 32),
         title: Text(file.name, overflow: TextOverflow.ellipsis),
         subtitle: file.isDirectory
             ? null

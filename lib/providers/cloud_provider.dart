@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -10,9 +11,8 @@ import '../services/discord_service.dart';
 
 enum CloudStatus { idle, loading, uploading, downloading, syncing, error }
 
-/// Index stocke sur Discord
 class CloudIndex {
-  static const String marker = '::DISCLOUD_INDEX_V2::';
+  static const String marker = '::DISCLOUD_INDEX_V3::';
   
   String? indexMessageId;
   Map<String, CloudFile> files = {};
@@ -20,7 +20,10 @@ class CloudIndex {
     'hasNitro': false,
     'compression': true,
     'theme': 'system',
+    'autoSyncEnabled': false,
+    'autoSyncInterval': 30,
   };
+  List<SyncFolder> syncFolders = [];
   DateTime lastModified = DateTime.now();
 
   CloudIndex();
@@ -39,24 +42,29 @@ class CloudIndex {
         index.files[key] = CloudFile.fromJson(value);
       });
     }
+    
+    if (json['syncFolders'] != null) {
+      index.syncFolders = (json['syncFolders'] as List)
+          .map((e) => SyncFolder.fromJson(e))
+          .toList();
+    }
+    
     return index;
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'marker': marker,
-      'indexMsgId': indexMessageId,
-      'lastMod': lastModified.millisecondsSinceEpoch,
-      'settings': settings,
-      'files': files.map((k, v) => MapEntry(k, v.toJson())),
-    };
-  }
+  Map<String, dynamic> toJson() => {
+    'marker': marker,
+    'indexMsgId': indexMessageId,
+    'lastMod': lastModified.millisecondsSinceEpoch,
+    'settings': settings,
+    'files': files.map((k, v) => MapEntry(k, v.toJson())),
+    'syncFolders': syncFolders.map((e) => e.toJson()).toList(),
+  };
 
   Uint8List toCompressedBytes() {
     final json = jsonEncode(toJson());
     final bytes = utf8.encode(json);
-    final compressed = gzip.encode(bytes);
-    return Uint8List.fromList(compressed);
+    return Uint8List.fromList(gzip.encode(bytes));
   }
 
   static CloudIndex? fromCompressedBytes(Uint8List data) {
@@ -64,7 +72,7 @@ class CloudIndex {
       final decompressed = gzip.decode(data);
       final json = utf8.decode(decompressed);
       final map = jsonDecode(json);
-      if (map['marker'] == marker) {
+      if (map['marker'] == marker || map['marker'] == '::DISCLOUD_INDEX_V2::') {
         return CloudIndex.fromJson(map);
       }
     } catch (e) {
@@ -75,12 +83,16 @@ class CloudIndex {
 }
 
 class CloudProvider extends ChangeNotifier {
-  DiscordService? _discord;
-  CloudIndex _index = CloudIndex();
+  final Map<String, DiscordService> _services = {};
+  final Map<String, WebhookInfo> _webhooks = {};
+  final Map<String, CloudIndex> _indexes = {};
   final Dio _dio = Dio();
-  CancelToken? _cancelToken;
   final _uuid = const Uuid();
-
+  
+  CancelToken? _cancelToken;
+  Timer? _autoSyncTimer;
+  
+  String? _currentWebhookId;
   String _currentPath = '/';
   List<CloudFile> _currentFiles = [];
   CloudStatus _status = CloudStatus.idle;
@@ -88,7 +100,6 @@ class CloudProvider extends ChangeNotifier {
   double _progress = 0;
   bool _isInitialized = false;
   String? _currentOperation;
-  String? _webhookUrl;
 
   // Getters
   String get currentPath => _currentPath;
@@ -97,30 +108,72 @@ class CloudProvider extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   double get progress => _progress;
   bool get isInitialized => _isInitialized;
-  bool get isConnected => _discord != null;
   String? get currentOperation => _currentOperation;
   bool get canCancel => _cancelToken != null && !_cancelToken!.isCancelled;
-  Map<String, dynamic> get settings => _index.settings;
+  
+  List<WebhookInfo> get webhooks => _webhooks.values.toList();
+  WebhookInfo? get currentWebhook => _currentWebhookId != null ? _webhooks[_currentWebhookId] : null;
+  String? get currentWebhookId => _currentWebhookId;
+  bool get isConnected => _webhooks.isNotEmpty;
+  bool get hasMultipleWebhooks => _webhooks.length > 1;
+  
+  CloudIndex get _currentIndex => _indexes[_currentWebhookId] ?? CloudIndex();
+  Map<String, dynamic> get settings => _currentIndex.settings;
+  List<SyncFolder> get syncFolders => _currentIndex.syncFolders;
 
-  int get totalFiles => _index.files.values.where((f) => !f.isDirectory).length;
-  int get totalFolders => _index.files.values.where((f) => f.isDirectory).length;
-  int get totalSize => _index.files.values.fold(0, (sum, f) => sum + f.size);
+  int get totalFiles => _currentIndex.files.values.where((f) => !f.isDirectory).length;
+  int get totalFolders => _currentIndex.files.values.where((f) => f.isDirectory).length;
+  int get totalSize => _currentIndex.files.values.fold(0, (sum, f) => sum + f.size);
 
   Future<void> init() async {
+    await _loadWebhooksFromLocal();
     _isInitialized = true;
     notifyListeners();
   }
 
-  /// Connexion au webhook et chargement de l'index depuis Discord
-  Future<bool> connect(String webhookUrl) async {
+  Future<void> _loadWebhooksFromLocal() async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final file = File('${tempDir.path}/discloud_webhooks.json');
+      if (await file.exists()) {
+        final json = jsonDecode(await file.readAsString());
+        final List webhooksList = json['webhooks'] ?? [];
+        for (final w in webhooksList) {
+          final info = WebhookInfo.fromJson(w);
+          _webhooks[info.id] = info;
+          _services[info.id] = DiscordService(webhookUrl: info.url);
+        }
+        if (_webhooks.isNotEmpty && _currentWebhookId == null) {
+          await selectWebhook(_webhooks.keys.first);
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to load webhooks: $e');
+    }
+  }
+
+  Future<void> _saveWebhooksToLocal() async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final file = File('${tempDir.path}/discloud_webhooks.json');
+      await file.writeAsString(jsonEncode({
+        'webhooks': _webhooks.values.map((w) => w.toJson()).toList(),
+      }));
+    } catch (e) {
+      debugPrint('Failed to save webhooks: $e');
+    }
+  }
+
+  // ==================== WEBHOOK MANAGEMENT ====================
+
+  Future<bool> addWebhook(String url, {String? name}) async {
     _status = CloudStatus.loading;
-    _currentOperation = 'Connecting...';
+    _currentOperation = 'Adding webhook...';
     notifyListeners();
 
     try {
-      final discord = DiscordService(webhookUrl: webhookUrl);
-      final isValid = await discord.validateWebhook();
-
+      final service = DiscordService(webhookUrl: url);
+      final isValid = await service.validateWebhook();
       if (!isValid) {
         _errorMessage = 'Invalid webhook URL';
         _status = CloudStatus.error;
@@ -128,29 +181,39 @@ class CloudProvider extends ChangeNotifier {
         return false;
       }
 
-      _discord = discord;
-      _webhookUrl = webhookUrl;
+      final info = await service.getWebhookInfo();
+      final webhookId = service.webhookId;
       
-      // Chercher l'index existant sur Discord
-      await _loadIndexFromDiscord();
+      if (_webhooks.containsKey(webhookId)) {
+        _errorMessage = 'Webhook already added';
+        _status = CloudStatus.error;
+        notifyListeners();
+        return false;
+      }
+
+      _webhooks[webhookId] = WebhookInfo(
+        id: webhookId,
+        name: name ?? info?['name'] ?? 'Webhook ${_webhooks.length + 1}',
+        url: url,
+      );
+      _services[webhookId] = service;
+      _indexes[webhookId] = CloudIndex();
+
+      await _saveWebhooksToLocal();
       
-      // Creer dossier racine si besoin
-      if (!_index.files.containsKey('/')) {
-        _index.files['/'] = CloudFile(
-          id: 'root',
-          name: 'Root',
-          path: '/',
-          isDirectory: true,
-        );
+      // Charger l'index de ce webhook
+      await _loadIndexForWebhook(webhookId);
+
+      if (_currentWebhookId == null) {
+        await selectWebhook(webhookId);
       }
 
       _status = CloudStatus.idle;
       _currentOperation = null;
-      _refreshCurrentDirectory();
       notifyListeners();
       return true;
     } catch (e) {
-      _errorMessage = 'Connection failed: $e';
+      _errorMessage = 'Failed to add webhook: $e';
       _status = CloudStatus.error;
       _currentOperation = null;
       notifyListeners();
@@ -158,109 +221,247 @@ class CloudProvider extends ChangeNotifier {
     }
   }
 
-  /// Charge l'index depuis Discord (cherche le message avec le marker)
-  Future<void> _loadIndexFromDiscord() async {
-    if (_discord == null) return;
+  Future<void> removeWebhook(String webhookId) async {
+    _webhooks.remove(webhookId);
+    _services.remove(webhookId);
+    _indexes.remove(webhookId);
     
-    _currentOperation = 'Loading index from Discord...';
+    if (_currentWebhookId == webhookId) {
+      _currentWebhookId = _webhooks.isNotEmpty ? _webhooks.keys.first : null;
+      _refreshCurrentDirectory();
+    }
+    
+    await _saveWebhooksToLocal();
+    notifyListeners();
+  }
+
+  Future<void> selectWebhook(String webhookId) async {
+    if (!_webhooks.containsKey(webhookId)) return;
+    
+    _currentWebhookId = webhookId;
+    _currentPath = '/';
+    
+    if (!_indexes.containsKey(webhookId)) {
+      await _loadIndexForWebhook(webhookId);
+    }
+    
+    // Creer dossier racine si besoin
+    if (!_currentIndex.files.containsKey('/')) {
+      _currentIndex.files['/'] = CloudFile(
+        id: 'root',
+        name: 'Root',
+        path: '/',
+        isDirectory: true,
+        webhookId: webhookId,
+      );
+    }
+    
+    _refreshCurrentDirectory();
+    _updateWebhookStats(webhookId);
+    _setupAutoSync();
+  }
+
+  Future<void> renameWebhook(String webhookId, String newName) async {
+    if (_webhooks.containsKey(webhookId)) {
+      _webhooks[webhookId] = _webhooks[webhookId]!.copyWith(name: newName);
+      await _saveWebhooksToLocal();
+      notifyListeners();
+    }
+  }
+
+  void _updateWebhookStats(String webhookId) {
+    final index = _indexes[webhookId];
+    if (index != null && _webhooks.containsKey(webhookId)) {
+      final files = index.files.values.where((f) => !f.isDirectory);
+      _webhooks[webhookId] = _webhooks[webhookId]!.copyWith(
+        fileCount: files.length,
+        totalSize: files.fold<int>(0, (sum, f) => sum + f.size),
+      );
+    }
+  }
+
+  // ==================== INDEX MANAGEMENT ====================
+
+  Future<void> _loadIndexForWebhook(String webhookId) async {
+    final service = _services[webhookId];
+    final webhook = _webhooks[webhookId];
+    if (service == null || webhook == null) return;
+
+    _currentOperation = 'Loading index...';
     notifyListeners();
 
     try {
-      // Recuperer les derniers messages pour trouver l'index
-      final response = await _dio.get(
-        '${_webhookUrl!.replaceAll('/webhooks/', '/channels/').split('/').take(6).join('/')}/messages?limit=50',
-        options: Options(headers: {
-          'Authorization': 'Bot ${_discord!.webhookToken}', // Ne marchera pas sans bot
-        }),
-      );
-      // Cette methode ne marche pas sans bot token, on utilise une autre approche
-    } catch (e) {
-      // Fallback: pas d'index trouve, on part de zero
-      debugPrint('No existing index found, starting fresh');
-    }
-
-    // Si on a un indexMessageId sauvegarde localement temporairement
-    // pour la transition, on le charge
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final indexFile = File('${tempDir.path}/discloud_index_ref.txt');
-      if (await indexFile.exists()) {
-        final msgId = await indexFile.readAsString();
-        if (msgId.isNotEmpty) {
-          final msg = await _discord!.getMessage(msgId.trim());
-          if (msg != null && msg['attachments'] != null) {
-            final attachments = msg['attachments'] as List;
-            if (attachments.isNotEmpty) {
-              final url = attachments[0]['url'];
-              final response = await _dio.get<List<int>>(
-                url,
-                options: Options(responseType: ResponseType.bytes),
-              );
-              if (response.data != null) {
-                final loaded = CloudIndex.fromCompressedBytes(Uint8List.fromList(response.data!));
-                if (loaded != null) {
-                  _index = loaded;
-                  _index.indexMessageId = msgId.trim();
-                  debugPrint('Index loaded: ${_index.files.length} files');
-                }
+      // Essayer de charger depuis le message ID sauvegarde
+      if (webhook.indexMessageId != null) {
+        final msg = await service.getMessage(webhook.indexMessageId!);
+        if (msg != null && msg['attachments'] != null) {
+          final attachments = msg['attachments'] as List;
+          if (attachments.isNotEmpty) {
+            final url = attachments[0]['url'];
+            final response = await _dio.get<List<int>>(
+              url,
+              options: Options(responseType: ResponseType.bytes),
+            );
+            if (response.data != null) {
+              final loaded = CloudIndex.fromCompressedBytes(Uint8List.fromList(response.data!));
+              if (loaded != null) {
+                _indexes[webhookId] = loaded;
+                _indexes[webhookId]!.indexMessageId = webhook.indexMessageId;
+                debugPrint('Index loaded for $webhookId: ${loaded.files.length} files');
               }
             }
           }
         }
       }
     } catch (e) {
-      debugPrint('Failed to load saved index: $e');
+      debugPrint('Failed to load index for $webhookId: $e');
     }
+
+    _indexes[webhookId] ??= CloudIndex();
+    _currentOperation = null;
+    notifyListeners();
   }
 
-  /// Sauvegarde l'index sur Discord
-  Future<void> _saveIndexToDiscord() async {
-    if (_discord == null) return;
+  Future<void> _saveIndexForWebhook(String webhookId) async {
+    final service = _services[webhookId];
+    final index = _indexes[webhookId];
+    if (service == null || index == null) return;
 
     try {
-      _index.lastModified = DateTime.now();
-      final data = _index.toCompressedBytes();
+      index.lastModified = DateTime.now();
+      final data = index.toCompressedBytes();
       
-      // Verifier taille < 9MB
       if (data.length > 9 * 1024 * 1024) {
-        throw Exception('Index too large (${(data.length / 1024 / 1024).toStringAsFixed(2)} MB)');
+        throw Exception('Index too large');
       }
 
       String? newMsgId;
       
-      if (_index.indexMessageId != null) {
-        // Essayer de mettre a jour le message existant
-        final success = await _discord!.editMessage(
-          _index.indexMessageId!,
+      if (index.indexMessageId != null) {
+        final success = await service.editMessage(
+          index.indexMessageId!,
           content: CloudIndex.marker,
           fileData: data,
           filename: 'index.dcidx',
         );
-        if (success) {
-          newMsgId = _index.indexMessageId;
-        }
+        if (success) newMsgId = index.indexMessageId;
       }
       
       if (newMsgId == null) {
-        // Creer nouveau message d'index
-        newMsgId = await _discord!.sendMessage(
+        newMsgId = await service.sendMessage(
           CloudIndex.marker,
           filename: 'index.dcidx',
           fileData: data,
         );
-        _index.indexMessageId = newMsgId;
+        index.indexMessageId = newMsgId;
       }
 
-      // Sauvegarder la reference localement (temporaire pour transition)
-      if (newMsgId != null) {
-        final tempDir = await getTemporaryDirectory();
-        final indexFile = File('${tempDir.path}/discloud_index_ref.txt');
-        await indexFile.writeAsString(newMsgId);
+      if (newMsgId != null && _webhooks.containsKey(webhookId)) {
+        _webhooks[webhookId] = _webhooks[webhookId]!.copyWith(indexMessageId: newMsgId);
+        await _saveWebhooksToLocal();
       }
     } catch (e) {
       debugPrint('Failed to save index: $e');
     }
   }
+
+  // ==================== AUTO SYNC ====================
+
+  void _setupAutoSync() {
+    _autoSyncTimer?.cancel();
+    
+    final enabled = _currentIndex.settings['autoSyncEnabled'] == true;
+    final interval = _currentIndex.settings['autoSyncInterval'] as int? ?? 30;
+    
+    if (enabled && syncFolders.any((f) => f.autoSync)) {
+      _autoSyncTimer = Timer.periodic(Duration(minutes: interval), (_) => _runAutoSync());
+    }
+  }
+
+  Future<void> _runAutoSync() async {
+    if (_status != CloudStatus.idle) return;
+    
+    for (final folder in syncFolders.where((f) => f.autoSync)) {
+      if (folder.webhookId == _currentWebhookId) {
+        await syncFolder(folder);
+      }
+    }
+  }
+
+  Future<void> addSyncFolder(SyncFolder folder) async {
+    _currentIndex.syncFolders.add(folder.copyWith(webhookId: _currentWebhookId ?? ''));
+    await _saveIndexForWebhook(_currentWebhookId!);
+    _setupAutoSync();
+    notifyListeners();
+  }
+
+  Future<void> removeSyncFolder(String localPath) async {
+    _currentIndex.syncFolders.removeWhere((f) => f.localPath == localPath);
+    await _saveIndexForWebhook(_currentWebhookId!);
+    _setupAutoSync();
+    notifyListeners();
+  }
+
+  Future<void> updateSyncFolder(SyncFolder folder) async {
+    final index = _currentIndex.syncFolders.indexWhere((f) => f.localPath == folder.localPath);
+    if (index >= 0) {
+      _currentIndex.syncFolders[index] = folder;
+      await _saveIndexForWebhook(_currentWebhookId!);
+      _setupAutoSync();
+      notifyListeners();
+    }
+  }
+
+  Future<void> syncFolder(SyncFolder folder) async {
+    if (_currentWebhookId == null || kIsWeb) return;
+
+    _status = CloudStatus.syncing;
+    _currentOperation = 'Syncing ${folder.localPath.split(Platform.pathSeparator).last}...';
+    _progress = 0;
+    notifyListeners();
+
+    try {
+      final dir = Directory(folder.localPath);
+      if (!await dir.exists()) throw Exception('Folder not found');
+
+      final files = await dir.list(recursive: true).where((e) => e is File).toList();
+      
+      for (int i = 0; i < files.length; i++) {
+        final file = files[i] as File;
+        final relativePath = file.path.substring(folder.localPath.length).replaceAll('\\', '/');
+        final cloudPath = folder.cloudPath == '/' 
+            ? relativePath 
+            : '${folder.cloudPath}$relativePath';
+
+        _progress = i / files.length;
+        _currentOperation = 'Uploading ${file.uri.pathSegments.last}...';
+        notifyListeners();
+
+        final bytes = await file.readAsBytes();
+        await _uploadFileInternal(file.uri.pathSegments.last, bytes, cloudPath: cloudPath);
+      }
+
+      // Update last sync
+      final idx = _currentIndex.syncFolders.indexWhere((f) => f.localPath == folder.localPath);
+      if (idx >= 0) {
+        _currentIndex.syncFolders[idx] = folder.copyWith(lastSync: DateTime.now());
+        await _saveIndexForWebhook(_currentWebhookId!);
+      }
+
+      _status = CloudStatus.idle;
+      _progress = 0;
+      _currentOperation = null;
+      notifyListeners();
+    } catch (e) {
+      _errorMessage = 'Sync failed: $e';
+      _status = CloudStatus.error;
+      _progress = 0;
+      _currentOperation = null;
+      notifyListeners();
+    }
+  }
+
+  // ==================== NAVIGATION ====================
 
   void cancelCurrentOperation() {
     _cancelToken?.cancel('Cancelled');
@@ -268,15 +469,6 @@ class CloudProvider extends ChangeNotifier {
     _status = CloudStatus.idle;
     _progress = 0;
     _currentOperation = null;
-    notifyListeners();
-  }
-
-  Future<void> disconnect() async {
-    _discord = null;
-    _webhookUrl = null;
-    _index = CloudIndex();
-    _currentFiles = [];
-    _currentPath = '/';
     notifyListeners();
   }
 
@@ -293,7 +485,7 @@ class CloudProvider extends ChangeNotifier {
   }
 
   void _refreshCurrentDirectory() {
-    _currentFiles = _index.files.values.where((f) {
+    _currentFiles = _currentIndex.files.values.where((f) {
       if (f.path == '/') return false;
       final parentPath = _getParentPath(f.path);
       return parentPath == _currentPath;
@@ -307,39 +499,50 @@ class CloudProvider extends ChangeNotifier {
   }
 
   Future<void> createFolder(String name) async {
+    if (_currentWebhookId == null) return;
+    
     final path = _currentPath == '/' ? '/$name' : '$_currentPath/$name';
     
-    if (_index.files.containsKey(path)) {
+    if (_currentIndex.files.containsKey(path)) {
       _errorMessage = 'Folder already exists';
+      notifyListeners();
       return;
     }
 
-    _index.files[path] = CloudFile(
+    _currentIndex.files[path] = CloudFile(
       id: _uuid.v4(),
       name: name,
       path: path,
       isDirectory: true,
+      webhookId: _currentWebhookId!,
     );
     
-    await _saveIndexToDiscord();
+    await _saveIndexForWebhook(_currentWebhookId!);
     _refreshCurrentDirectory();
   }
 
   // ==================== UPLOAD ====================
 
   Future<void> uploadFile(String name, Uint8List data, {String? mimeType}) async {
-    if (_discord == null) {
-      _errorMessage = 'Not connected';
+    await _uploadFileInternal(name, data, mimeType: mimeType);
+  }
+
+  Future<void> _uploadFileInternal(String name, Uint8List data, {String? mimeType, String? cloudPath}) async {
+    if (_currentWebhookId == null) {
+      _errorMessage = 'No webhook selected';
       _status = CloudStatus.error;
       notifyListeners();
       return;
     }
 
-    final path = _currentPath == '/' ? '/$name' : '$_currentPath/$name';
+    final service = _services[_currentWebhookId];
+    if (service == null) return;
+
+    final path = cloudPath ?? (_currentPath == '/' ? '/$name' : '$_currentPath/$name');
     
-    // Si le fichier existe deja, le supprimer d'abord de Discord
-    if (_index.files.containsKey(path)) {
-      await _deleteFileFromDiscord(_index.files[path]!);
+    // Si existe, supprimer d'abord
+    if (_currentIndex.files.containsKey(path)) {
+      await _deleteFileFromDiscord(_currentIndex.files[path]!);
     }
 
     _status = CloudStatus.uploading;
@@ -349,17 +552,13 @@ class CloudProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final result = await _discord!.uploadFile(
-        data,
-        name,
+      final result = await service.uploadFile(
+        data, name,
         cancelToken: _cancelToken,
-        onProgress: (p) {
-          _progress = p;
-          notifyListeners();
-        },
+        onProgress: (p) { _progress = p; notifyListeners(); },
       );
 
-      _index.files[path] = CloudFile(
+      _currentIndex.files[path] = CloudFile(
         id: _uuid.v4(),
         name: name,
         path: path,
@@ -369,9 +568,11 @@ class CloudProvider extends ChangeNotifier {
         messageIds: result.messageIds,
         mimeType: mimeType,
         isCompressed: result.isCompressed,
+        webhookId: _currentWebhookId!,
       );
 
-      await _saveIndexToDiscord();
+      await _saveIndexForWebhook(_currentWebhookId!);
+      _updateWebhookStats(_currentWebhookId!);
       
       _status = CloudStatus.idle;
       _progress = 0;
@@ -414,7 +615,6 @@ class CloudProvider extends ChangeNotifier {
 
       if (response.data == null) throw Exception('No data');
       
-      _currentOperation = 'Uploading $fileName';
       _progress = 0.5;
       notifyListeners();
 
@@ -436,7 +636,8 @@ class CloudProvider extends ChangeNotifier {
   // ==================== DOWNLOAD ====================
 
   Future<Uint8List?> downloadFile(CloudFile file) async {
-    if (_discord == null || file.chunkUrls.isEmpty) return null;
+    final service = _services[file.webhookId.isNotEmpty ? file.webhookId : _currentWebhookId];
+    if (service == null || file.chunkUrls.isEmpty) return null;
 
     _status = CloudStatus.downloading;
     _progress = 0;
@@ -445,7 +646,7 @@ class CloudProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final data = await _discord!.downloadFile(
+      final data = await service.downloadFile(
         file.chunkUrls,
         isCompressed: file.isCompressed,
         cancelToken: _cancelToken,
@@ -489,8 +690,9 @@ class CloudProvider extends ChangeNotifier {
   // ==================== DELETE ====================
 
   Future<void> _deleteFileFromDiscord(CloudFile file) async {
-    if (_discord == null || file.messageIds.isEmpty) return;
-    await _discord!.deleteMessages(file.messageIds);
+    final service = _services[file.webhookId.isNotEmpty ? file.webhookId : _currentWebhookId];
+    if (service == null || file.messageIds.isEmpty) return;
+    await service.deleteMessages(file.messageIds);
   }
 
   Future<void> deleteFile(CloudFile file) async {
@@ -498,25 +700,20 @@ class CloudProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Supprimer de Discord
       await _deleteFileFromDiscord(file);
+      _currentIndex.files.remove(file.path);
       
-      // Supprimer de l'index
-      _index.files.remove(file.path);
-      
-      // Si c'est un dossier, supprimer le contenu
       if (file.isDirectory) {
-        final toDelete = _index.files.keys
-            .where((p) => p.startsWith('${file.path}/'))
-            .toList();
+        final toDelete = _currentIndex.files.keys.where((p) => p.startsWith('${file.path}/')).toList();
         for (final path in toDelete) {
-          final f = _index.files[path];
+          final f = _currentIndex.files[path];
           if (f != null) await _deleteFileFromDiscord(f);
-          _index.files.remove(path);
+          _currentIndex.files.remove(path);
         }
       }
 
-      await _saveIndexToDiscord();
+      await _saveIndexForWebhook(_currentWebhookId!);
+      _updateWebhookStats(_currentWebhookId!);
       _currentOperation = null;
       _refreshCurrentDirectory();
     } catch (e) {
@@ -526,23 +723,10 @@ class CloudProvider extends ChangeNotifier {
     }
   }
 
-  Future<int> deleteAllInCurrentFolder() async {
-    final toDelete = _currentFiles.toList();
-    int count = 0;
-    for (final file in toDelete) {
-      await deleteFile(file);
-      count++;
-    }
-    return count;
-  }
-
   // ==================== UPDATE ====================
 
   Future<void> updateFile(CloudFile file, Uint8List newData) async {
-    // Supprimer l'ancien de Discord d'abord
     await _deleteFileFromDiscord(file);
-    
-    // Uploader le nouveau
     await uploadFile(file.name, newData, mimeType: file.mimeType);
   }
 
@@ -550,31 +734,31 @@ class CloudProvider extends ChangeNotifier {
     final parentPath = _getParentPath(file.path);
     final newPath = parentPath == '/' ? '/$newName' : '$parentPath/$newName';
     
-    _index.files.remove(file.path);
-    _index.files[newPath] = file.copyWith(name: newName, path: newPath);
+    _currentIndex.files.remove(file.path);
+    _currentIndex.files[newPath] = file.copyWith(name: newName, path: newPath);
     
-    // Si c'est un dossier, renommer le contenu aussi
     if (file.isDirectory) {
-      final toRename = _index.files.keys
-          .where((p) => p.startsWith('${file.path}/'))
-          .toList();
+      final toRename = _currentIndex.files.keys.where((p) => p.startsWith('${file.path}/')).toList();
       for (final oldPath in toRename) {
-        final f = _index.files[oldPath]!;
+        final f = _currentIndex.files[oldPath]!;
         final newChildPath = oldPath.replaceFirst(file.path, newPath);
-        _index.files.remove(oldPath);
-        _index.files[newChildPath] = f.copyWith(path: newChildPath);
+        _currentIndex.files.remove(oldPath);
+        _currentIndex.files[newChildPath] = f.copyWith(path: newChildPath);
       }
     }
 
-    await _saveIndexToDiscord();
+    await _saveIndexForWebhook(_currentWebhookId!);
     _refreshCurrentDirectory();
   }
 
   // ==================== SETTINGS ====================
 
   Future<void> updateSetting(String key, dynamic value) async {
-    _index.settings[key] = value;
-    await _saveIndexToDiscord();
+    _currentIndex.settings[key] = value;
+    await _saveIndexForWebhook(_currentWebhookId!);
+    if (key == 'autoSyncEnabled' || key == 'autoSyncInterval') {
+      _setupAutoSync();
+    }
     notifyListeners();
   }
 
@@ -593,6 +777,12 @@ class CloudProvider extends ChangeNotifier {
   }
 
   List<CloudFile> getAllFiles() {
-    return _index.files.values.where((f) => !f.isDirectory).toList();
+    return _currentIndex.files.values.where((f) => !f.isDirectory).toList();
+  }
+
+  @override
+  void dispose() {
+    _autoSyncTimer?.cancel();
+    super.dispose();
   }
 }
