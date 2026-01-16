@@ -16,6 +16,7 @@ import 'sync_screen.dart';
 import 'upload_options_screen.dart';
 import 'download_manager_screen.dart';
 import 'share_screen.dart';
+import 'download_center_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -179,6 +180,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     }),
                     const Divider(),
                     _DrawerItem(icon: Icons.add, title: 'Add Webhook', onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (_) => const WebhooksScreen())); }),
+                    _DrawerItem(icon: Icons.cloud_download, title: 'Download Center', subtitle: 'Video, Torrent, Batch', onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (_) => const DownloadCenterScreen())); }),
                     _DrawerItem(icon: Icons.download, title: 'Downloads', badge: context.watch<DownloadManager>().activeCount, onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (_) => const DownloadManagerScreen())); }),
                     _DrawerItem(icon: Icons.sync, title: 'Auto Sync', subtitle: provider.settings['autoSyncEnabled'] == true ? 'Enabled' : 'Disabled', onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncScreen())); }),
                     _DrawerItem(icon: Icons.settings, title: 'Settings', onTap: () { Navigator.pop(context); Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())); }),
