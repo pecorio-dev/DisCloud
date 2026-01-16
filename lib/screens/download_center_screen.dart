@@ -2,10 +2,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
 import '../providers/cloud_provider.dart';
+import '../providers/download_manager.dart';
+import '../models/download_task.dart';
 import '../services/universal_downloader.dart';
 import '../services/torrent_service.dart';
 import '../services/dependency_manager.dart';
+import '../services/share_link_service.dart';
 
 class DownloadCenterScreen extends StatefulWidget {
   const DownloadCenterScreen({super.key});
@@ -35,7 +39,7 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
     _initDeps();
     _torrentService.addListener(() => setState(() {}));
     _depManager.addListener(() => setState(() {}));
@@ -88,18 +92,20 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
         bottom: TabBar(
           controller: _tabController,
           isScrollable: true,
-          tabs: const [
-            Tab(icon: Icon(Icons.link), text: 'Direct'),
-            Tab(icon: Icon(Icons.video_library), text: 'Video'),
-            Tab(icon: Icon(Icons.cloud_download), text: 'Torrent'),
-            Tab(icon: Icon(Icons.list), text: 'Batch'),
-            Tab(icon: Icon(Icons.settings), text: 'Tools'),
+          tabs: [
+            const Tab(icon: Icon(Icons.download), text: 'Queue'),
+            const Tab(icon: Icon(Icons.link), text: 'Direct'),
+            const Tab(icon: Icon(Icons.video_library), text: 'Video'),
+            const Tab(icon: Icon(Icons.cloud_download), text: 'Torrent'),
+            const Tab(icon: Icon(Icons.list), text: 'Batch'),
+            const Tab(icon: Icon(Icons.build), text: 'Tools'),
           ],
         ),
       ),
       body: TabBarView(
         controller: _tabController,
         children: [
+          _buildQueueTab(),
           _buildDirectTab(),
           _buildVideoTab(),
           _buildTorrentTab(),
@@ -127,8 +133,240 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
       tooltip: allInstalled 
           ? (hasUpdates ? 'Updates available' : 'All tools installed')
           : 'Missing tools',
-      onPressed: () => _tabController.animateTo(4),
+      onPressed: () => _tabController.animateTo(5),
     );
+  }
+
+  // ========== QUEUE TAB (integrated download manager) ==========
+  Widget _buildQueueTab() {
+    return Consumer<DownloadManager>(
+      builder: (context, manager, _) {
+        final allTasks = [...manager.activeTasks, ...manager.queuedTasks, ...manager.completedTasks, ...manager.failedTasks];
+        
+        if (allTasks.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.cloud_download, size: 80, color: Colors.grey.shade300),
+                const SizedBox(height: 16),
+                const Text('No downloads', style: TextStyle(fontSize: 18, color: Colors.grey)),
+                const SizedBox(height: 8),
+                const Text('Add files from Video, Torrent or Batch tabs', style: TextStyle(color: Colors.grey)),
+                const SizedBox(height: 24),
+                OutlinedButton.icon(
+                  onPressed: _showImportLinkDialog,
+                  icon: const Icon(Icons.link),
+                  label: const Text('Import DisCloud Link'),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return Column(
+          children: [
+            // Stats bar
+            Container(
+              padding: const EdgeInsets.all(12),
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _QueueStat(label: 'Active', value: manager.activeTasks.length, color: Colors.blue),
+                  _QueueStat(label: 'Queued', value: manager.queuedTasks.length, color: Colors.orange),
+                  _QueueStat(label: 'Done', value: manager.completedTasks.length, color: Colors.green),
+                  _QueueStat(label: 'Failed', value: manager.failedTasks.length, color: Colors.red),
+                ],
+              ),
+            ),
+            // Actions bar
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: _showImportLinkDialog,
+                    icon: const Icon(Icons.add_link, size: 18),
+                    label: const Text('Import Link'),
+                  ),
+                  const Spacer(),
+                  if (manager.completedTasks.isNotEmpty)
+                    TextButton(
+                      onPressed: manager.clearCompleted,
+                      child: const Text('Clear Done'),
+                    ),
+                  if (allTasks.isNotEmpty)
+                    TextButton(
+                      onPressed: manager.clearAll,
+                      child: const Text('Clear All', style: TextStyle(color: Colors.red)),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            // Task list
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.all(8),
+                itemCount: allTasks.length,
+                itemBuilder: (context, index) {
+                  final task = allTasks[index];
+                  return _DownloadTaskCard(
+                    task: task,
+                    onPause: () => manager.pauseDownload(task.id),
+                    onResume: () => manager.resumeDownload(task.id),
+                    onCancel: () => manager.cancelDownload(task.id),
+                    onRetry: () => manager.retryDownload(task.id),
+                    onRemove: () => manager.removeTask(task.id),
+                    onSave: () => _saveDownloadedFile(task),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showImportLinkDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Import DisCloud Link'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'DisCloud Link',
+                hintText: 'discloud://...',
+                prefixIcon: Icon(Icons.link),
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 3,
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () async {
+                  final data = await Clipboard.getData('text/plain');
+                  if (data?.text != null) controller.text = data!.text!;
+                },
+                icon: const Icon(Icons.paste),
+                label: const Text('Paste'),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _importDisCloudLink(controller.text);
+            },
+            child: const Text('Import'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _importDisCloudLink(String link) {
+    final shareData = ShareLinkService.parseShareLink(link);
+    if (shareData == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid link'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    final manager = context.read<DownloadManager>();
+    
+    if (shareData.hasEncryptedFiles) {
+      _showDecryptionKeyDialog(shareData, manager);
+    } else {
+      _addDownloadsFromShareData(shareData, manager);
+    }
+  }
+
+  void _showDecryptionKeyDialog(ShareData shareData, DownloadManager manager) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Encrypted Files'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('These files are encrypted. Enter the decryption key:'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Decryption Key',
+                prefixIcon: Icon(Icons.key),
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              manager.setGlobalEncryptionKey(controller.text);
+              _addDownloadsFromShareData(shareData, manager);
+            },
+            child: const Text('Decrypt & Download'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addDownloadsFromShareData(ShareData shareData, DownloadManager manager) {
+    for (final file in shareData.files) {
+      manager.addDownload(
+        name: file.name,
+        size: file.size,
+        urls: file.urls,
+        isCompressed: file.isCompressed,
+        checksum: file.checksum,
+        metadata: file.metadata,
+      );
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Added ${shareData.files.length} download(s)'), backgroundColor: Colors.green),
+    );
+  }
+
+  Future<void> _saveDownloadedFile(DownloadTask task) async {
+    if (task.data == null) return;
+    final savePath = await FilePicker.platform.getDirectoryPath();
+    if (savePath == null) return;
+    try {
+      final file = File('$savePath/${task.name}');
+      await file.writeAsBytes(task.data!);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Saved to $savePath'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
   }
 
   Widget _buildToolsTab() {
@@ -1403,5 +1641,163 @@ class _DependencyCard extends StatelessWidget {
     }
     
     return const Icon(Icons.check, color: Colors.green);
+  }
+}
+
+// ========== Queue Tab Widgets ==========
+
+class _QueueStat extends StatelessWidget {
+  final String label;
+  final int value;
+  final Color color;
+
+  const _QueueStat({required this.label, required this.value, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('$value', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color)),
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+      ],
+    );
+  }
+}
+
+class _DownloadTaskCard extends StatelessWidget {
+  final DownloadTask task;
+  final VoidCallback onPause;
+  final VoidCallback onResume;
+  final VoidCallback onCancel;
+  final VoidCallback onRetry;
+  final VoidCallback onRemove;
+  final VoidCallback onSave;
+
+  const _DownloadTaskCard({
+    required this.task,
+    required this.onPause,
+    required this.onResume,
+    required this.onCancel,
+    required this.onRetry,
+    required this.onRemove,
+    required this.onSave,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _buildStatusIcon(),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(task.name, style: const TextStyle(fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          Text(task.formattedSize, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                          const SizedBox(width: 8),
+                          Text('${task.chunkCount} chunks', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                          if (task.isEncrypted) ...[
+                            const SizedBox(width: 8),
+                            const Icon(Icons.lock, size: 14, color: Colors.orange),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                _buildActions(),
+              ],
+            ),
+            if (task.status == DownloadStatus.downloading || task.status == DownloadStatus.queued) ...[
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: task.progress,
+                  minHeight: 6,
+                  backgroundColor: Colors.grey.shade200,
+                  valueColor: AlwaysStoppedAnimation(Color.lerp(Colors.blue, Colors.green, task.progress)!),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('${(task.progress * 100).toInt()}%', style: const TextStyle(fontSize: 12)),
+                  if (task.status == DownloadStatus.downloading) ...[
+                    Text(task.formattedSpeed, style: const TextStyle(fontSize: 12)),
+                    Text('ETA: ${task.formattedETA}', style: const TextStyle(fontSize: 12)),
+                  ] else
+                    const Text('Queued', style: TextStyle(fontSize: 12, color: Colors.orange)),
+                ],
+              ),
+            ],
+            if (task.status == DownloadStatus.failed && task.error != null) ...[
+              const SizedBox(height: 8),
+              Text(task.error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusIcon() {
+    IconData icon;
+    Color color;
+    switch (task.status) {
+      case DownloadStatus.queued:
+        icon = Icons.hourglass_empty; color = Colors.orange; break;
+      case DownloadStatus.downloading:
+        icon = Icons.downloading; color = Colors.blue; break;
+      case DownloadStatus.paused:
+        icon = Icons.pause_circle; color = Colors.grey; break;
+      case DownloadStatus.completed:
+        icon = Icons.check_circle; color = Colors.green; break;
+      case DownloadStatus.failed:
+        icon = Icons.error; color = Colors.red; break;
+      case DownloadStatus.cancelled:
+        icon = Icons.cancel; color = Colors.grey; break;
+    }
+    return Icon(icon, color: color, size: 28);
+  }
+
+  Widget _buildActions() {
+    switch (task.status) {
+      case DownloadStatus.downloading:
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(icon: const Icon(Icons.pause), onPressed: onPause, tooltip: 'Pause'),
+          IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: onCancel, tooltip: 'Cancel'),
+        ]);
+      case DownloadStatus.paused:
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(icon: const Icon(Icons.play_arrow, color: Colors.green), onPressed: onResume, tooltip: 'Resume'),
+          IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: onCancel, tooltip: 'Cancel'),
+        ]);
+      case DownloadStatus.queued:
+        return IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: onCancel, tooltip: 'Cancel');
+      case DownloadStatus.completed:
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(icon: const Icon(Icons.save_alt, color: Colors.blue), onPressed: onSave, tooltip: 'Save'),
+          IconButton(icon: const Icon(Icons.delete_outline), onPressed: onRemove, tooltip: 'Remove'),
+        ]);
+      case DownloadStatus.failed:
+      case DownloadStatus.cancelled:
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(icon: const Icon(Icons.refresh, color: Colors.orange), onPressed: onRetry, tooltip: 'Retry'),
+          IconButton(icon: const Icon(Icons.delete_outline), onPressed: onRemove, tooltip: 'Remove'),
+        ]);
+    }
   }
 }

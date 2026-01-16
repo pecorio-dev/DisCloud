@@ -301,7 +301,7 @@ class SettingsScreen extends StatelessWidget {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Text('DisCloud', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                                  Text('Version 2.5', style: TextStyle(color: Colors.grey.shade600)),
+                                  Text('Version 2.8', style: TextStyle(color: Colors.grey.shade600)),
                                 ],
                               ),
                             ],
