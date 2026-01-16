@@ -43,7 +43,27 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
 
   Future<void> _initDeps() async {
     await _depManager.init();
-    _downloader.init();
+    
+    // Passer les chemins des outils au downloader
+    await _downloader.init(
+      ytDlpPath: _depManager.ytDlpPath,
+      aria2Path: _depManager.aria2Path,
+    );
+    
+    // Mettre a jour les chemins quand les dependances changent
+    _depManager.addListener(_onDepManagerUpdate);
+  }
+  
+  void _onDepManagerUpdate() {
+    _downloader.updatePaths(
+      ytDlpPath: _depManager.ytDlpPath,
+      aria2Path: _depManager.aria2Path,
+    );
+    
+    // Mettre a jour aussi le TorrentService avec aria2
+    if (_depManager.aria2Path != null && !_torrentService.isRunning) {
+      _torrentService.setAria2Path(_depManager.aria2Path!);
+    }
   }
 
   @override
@@ -362,21 +382,66 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
         children: [
           Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Video Downloader', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                    SizedBox(height: 4),
-                    Text('YouTube, Uqload, Vimeo, and more', style: TextStyle(color: Colors.grey)),
+                    const Text('Video Downloader', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        const Text('YouTube, Uqload, Vimeo, and more', style: TextStyle(color: Colors.grey)),
+                        const SizedBox(width: 8),
+                        if (_downloader.ytDlpAvailable)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.green.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.check, size: 12, color: Colors.green),
+                                const SizedBox(width: 4),
+                                Text('yt-dlp ready', style: TextStyle(fontSize: 10, color: Colors.green.shade700)),
+                              ],
+                            ),
+                          )
+                        else
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.warning, size: 12, color: Colors.orange),
+                                const SizedBox(width: 4),
+                                Text('yt-dlp needed', style: TextStyle(fontSize: 10, color: Colors.orange.shade700)),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
                   ],
                 ),
               ),
               if (!_downloader.ytDlpAvailable)
-                TextButton.icon(
-                  onPressed: _installYtDlp,
-                  icon: const Icon(Icons.download),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    await _installDependency('yt-dlp');
+                    await _downloader.refresh();
+                    setState(() {});
+                  },
+                  icon: const Icon(Icons.download, size: 16),
                   label: const Text('Install yt-dlp'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                  ),
                 ),
             ],
           ),
@@ -725,6 +790,48 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
 
+    // Verifier si yt-dlp est disponible
+    if (!_downloader.ytDlpAvailable) {
+      setState(() {
+        _error = 'yt-dlp is not installed. Please go to the Tools tab to install it.';
+      });
+      
+      // Proposer d'installer
+      if (mounted) {
+        final install = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('yt-dlp Required'),
+            content: const Text(
+              'yt-dlp is required to extract videos from most sites.\n\n'
+              'Would you like to install it now?'
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Install'),
+              ),
+            ],
+          ),
+        );
+        
+        if (install == true) {
+          await _installDependency('yt-dlp');
+          await _downloader.refresh();
+          setState(() => _error = null);
+          // Re-essayer l'extraction
+          if (_downloader.ytDlpAvailable) {
+            _extractVideo();
+          }
+        }
+      }
+      return;
+    }
+
     setState(() {
       _isExtracting = true;
       _extractedVideos = null;
@@ -732,14 +839,23 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
     });
 
     try {
+      debugPrint('Extracting video from: $url');
+      debugPrint('Using yt-dlp at: ${_downloader.ytDlpPath}');
+      
       final videos = await _downloader.extractVideoInfo(url);
       setState(() => _extractedVideos = videos);
       
       if (videos.isEmpty) {
-        setState(() => _error = 'No videos found. Try installing yt-dlp for better support.');
+        setState(() {
+          _error = 'No videos found at this URL.\n\n'
+              'Possible reasons:\n'
+              '• The URL might be invalid or expired\n'
+              '• The site may require authentication\n'
+              '• yt-dlp may need to be updated';
+        });
       }
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = 'Error extracting video: $e');
     } finally {
       setState(() => _isExtracting = false);
     }
@@ -782,29 +898,6 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
       setState(() => _error = e.toString());
     } finally {
       setState(() => _isDownloading = false);
-    }
-  }
-
-  Future<void> _installYtDlp() async {
-    setState(() {
-      _isDownloading = true;
-      _status = 'Downloading yt-dlp...';
-      _progress = 0;
-    });
-
-    final success = await _downloader.downloadYtDlp(
-      onProgress: (p) => setState(() => _progress = p),
-    );
-
-    setState(() => _isDownloading = false);
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(success ? 'yt-dlp installed!' : 'Failed to install yt-dlp'),
-          backgroundColor: success ? Colors.green : Colors.red,
-        ),
-      );
     }
   }
 

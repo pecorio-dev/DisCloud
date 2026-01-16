@@ -87,34 +87,149 @@ class UniversalDownloader extends ChangeNotifier {
 
   Process? _ytDlpProcess;
   String? _ytDlpPath;
+  String? _aria2Path;
   bool _ytDlpAvailable = false;
+  bool _aria2Available = false;
 
   bool get ytDlpAvailable => _ytDlpAvailable;
+  bool get aria2Available => _aria2Available;
+  String? get ytDlpPath => _ytDlpPath;
+  String? get aria2Path => _aria2Path;
 
-  Future<void> init() async {
-    await _checkYtDlp();
+  /// Initialise avec les chemins du DependencyManager
+  Future<void> init({String? ytDlpPath, String? aria2Path}) async {
+    if (ytDlpPath != null) {
+      _ytDlpPath = ytDlpPath;
+      _ytDlpAvailable = true;
+      debugPrint('yt-dlp path set: $ytDlpPath');
+    }
+    if (aria2Path != null) {
+      _aria2Path = aria2Path;
+      _aria2Available = true;
+      debugPrint('aria2 path set: $aria2Path');
+    }
+    
+    // Si pas de chemins fournis, chercher automatiquement
+    if (_ytDlpPath == null) {
+      await _findYtDlp();
+    }
+    if (_aria2Path == null) {
+      await _findAria2();
+    }
+    
+    notifyListeners();
   }
 
-  Future<void> _checkYtDlp() async {
-    // Chercher yt-dlp dans le PATH ou le dossier de l'app
+  /// Mettre a jour les chemins (appele par DependencyManager)
+  void updatePaths({String? ytDlpPath, String? aria2Path}) {
+    if (ytDlpPath != null) {
+      _ytDlpPath = ytDlpPath;
+      _ytDlpAvailable = true;
+    }
+    if (aria2Path != null) {
+      _aria2Path = aria2Path;
+      _aria2Available = true;
+    }
+    notifyListeners();
+  }
+
+  Future<void> _findYtDlp() async {
+    // 1. Chercher dans le dossier bin de l'app
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final binPath = '${appDir.path}${Platform.pathSeparator}bin${Platform.pathSeparator}yt-dlp.exe';
+      final binFile = File(binPath);
+      if (await binFile.exists()) {
+        // Verifier que ca fonctionne
+        final result = await Process.run(binPath, ['--version']);
+        if (result.exitCode == 0) {
+          _ytDlpPath = binPath;
+          _ytDlpAvailable = true;
+          debugPrint('yt-dlp found in bin: $binPath (${result.stdout.toString().trim()})');
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking bin/yt-dlp: $e');
+    }
+    
+    // 2. Chercher dans le PATH systeme
     try {
       final result = await Process.run('yt-dlp', ['--version']);
       if (result.exitCode == 0) {
         _ytDlpPath = 'yt-dlp';
         _ytDlpAvailable = true;
-        debugPrint('yt-dlp found: ${result.stdout}');
+        debugPrint('yt-dlp found in PATH: ${result.stdout}');
+        return;
       }
-    } catch (e) {
-      // Essayer avec chemin complet Windows
+    } catch (_) {}
+    
+    // 3. Chercher dans des emplacements communs Windows
+    final commonPaths = [
+      'C:\\Program Files\\yt-dlp\\yt-dlp.exe',
+      'C:\\Program Files (x86)\\yt-dlp\\yt-dlp.exe',
+      '${Platform.environment['LOCALAPPDATA']}\\yt-dlp\\yt-dlp.exe',
+      '${Platform.environment['APPDATA']}\\yt-dlp\\yt-dlp.exe',
+    ];
+    
+    for (final path in commonPaths) {
       try {
-        final appDir = await getApplicationSupportDirectory();
-        final ytdlpFile = File('${appDir.path}/yt-dlp.exe');
-        if (await ytdlpFile.exists()) {
-          _ytDlpPath = ytdlpFile.path;
-          _ytDlpAvailable = true;
+        if (await File(path).exists()) {
+          final result = await Process.run(path, ['--version']);
+          if (result.exitCode == 0) {
+            _ytDlpPath = path;
+            _ytDlpAvailable = true;
+            debugPrint('yt-dlp found at: $path');
+            return;
+          }
         }
       } catch (_) {}
     }
+    
+    debugPrint('yt-dlp not found');
+  }
+
+  Future<void> _findAria2() async {
+    // 1. Chercher dans le dossier bin de l'app
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final binPath = '${appDir.path}${Platform.pathSeparator}bin${Platform.pathSeparator}aria2c.exe';
+      final binFile = File(binPath);
+      if (await binFile.exists()) {
+        final result = await Process.run(binPath, ['--version']);
+        if (result.exitCode == 0) {
+          _aria2Path = binPath;
+          _aria2Available = true;
+          debugPrint('aria2 found in bin: $binPath');
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking bin/aria2c: $e');
+    }
+    
+    // 2. Chercher dans le PATH
+    try {
+      final result = await Process.run('aria2c', ['--version']);
+      if (result.exitCode == 0) {
+        _aria2Path = 'aria2c';
+        _aria2Available = true;
+        debugPrint('aria2 found in PATH');
+        return;
+      }
+    } catch (_) {}
+    
+    debugPrint('aria2 not found');
+  }
+
+  /// Force la re-detection des outils
+  Future<void> refresh() async {
+    _ytDlpAvailable = false;
+    _aria2Available = false;
+    _ytDlpPath = null;
+    _aria2Path = null;
+    await _findYtDlp();
+    await _findAria2();
     notifyListeners();
   }
 

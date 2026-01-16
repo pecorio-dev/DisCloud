@@ -71,31 +71,44 @@ class TorrentService extends ChangeNotifier {
   Process? _aria2Process;
   String? _aria2RpcUrl;
   String? _aria2Secret;
+  String? _aria2Path; // Chemin vers aria2c
   bool _isRunning = false;
   final Map<String, TorrentInfo> _torrents = {};
   Timer? _updateTimer;
 
   bool get isRunning => _isRunning;
   List<TorrentInfo> get torrents => _torrents.values.toList();
+  String? get aria2Path => _aria2Path;
+
+  /// Definir le chemin aria2
+  void setAria2Path(String path) {
+    _aria2Path = path;
+    debugPrint('TorrentService: aria2 path set to $path');
+    notifyListeners();
+  }
 
   /// Demarre le service aria2c
   Future<bool> start() async {
     if (_isRunning) return true;
 
+    // Determiner le chemin aria2
+    String aria2Executable = _aria2Path ?? 'aria2c';
+
     try {
       // Verifier si aria2c est disponible
-      final testResult = await Process.run('aria2c', ['--version']);
+      final testResult = await Process.run(aria2Executable, ['--version']);
       if (testResult.exitCode != 0) {
-        debugPrint('aria2c not found');
+        debugPrint('aria2c not found at: $aria2Executable');
         return false;
       }
+      debugPrint('aria2c found: ${testResult.stdout.toString().split('\n').first}');
 
       // Demarrer aria2c en mode RPC
       _aria2Secret = DateTime.now().millisecondsSinceEpoch.toString();
       final tempDir = await getTemporaryDirectory();
       
       _aria2Process = await Process.start(
-        'aria2c',
+        aria2Executable,
         [
           '--enable-rpc',
           '--rpc-listen-port=6800',
