@@ -578,11 +578,16 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
                   onChanged: (v) async {
                     if (v) {
                       _torrentService.setAria2Path(_depManager.aria2Path!);
-                      await _torrentService.start();
+                      final success = await _torrentService.start();
+                      if (!success && mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Failed to start aria2. Check if the path is correct.'), backgroundColor: Colors.red),
+                        );
+                      }
                     } else {
                       await _torrentService.stop();
                     }
-                    setState(() {});
+                    if (mounted) setState(() {});
                   },
                 )
               else

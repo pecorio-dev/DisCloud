@@ -289,7 +289,13 @@ class UniversalDownloader extends ChangeNotifier {
           '--no-playlist',         // Single video only
           '--no-warnings',         // Suppress warnings
           '--no-check-certificate', // Skip SSL verification
-          '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          '--geo-bypass',          // Bypass geo-restrictions
+          '--ignore-errors',       // Continue on errors
+          '--no-color',            // No ANSI colors in output
+          '--socket-timeout', '30', // Timeout for network operations
+          '--retries', '3',        // Retry failed downloads
+          // yt-dlp determines headers automatically per extractor
+          // No need to specify User-Agent, it uses the right one for each site
           url,
         ],
         runInShell: true,
@@ -417,9 +423,14 @@ class UniversalDownloader extends ChangeNotifier {
         '-o', outputPath,
         '--no-playlist',
         '--no-check-certificate',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        '--geo-bypass',
+        '--ignore-errors',
+        '--no-color',
+        '--socket-timeout', '30',
+        '--retries', '3',
         '--progress',
         '--newline',
+        // yt-dlp uses appropriate headers automatically per extractor
       ];
       
       // Ajouter la qualite si specifiee
