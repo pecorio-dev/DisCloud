@@ -10,6 +10,7 @@ import '../widgets/image_viewer.dart';
 import '../widgets/code_viewer.dart';
 import '../widgets/text_viewer.dart';
 import '../widgets/media_player.dart';
+import '../widgets/cloud_video_player.dart';
 
 enum FileType {
   image,
@@ -288,9 +289,11 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
           fileName: widget.file.name,
         );
       case FileType.video:
-        return VideoPlayer(
-          data: _data!,
-          fileName: widget.file.name,
+        // Utiliser le lecteur video avec streaming et decryption
+        final provider = context.read<CloudProvider>();
+        return CloudVideoPlayer(
+          file: widget.file,
+          encryptionKey: provider.encryptionKey,
         );
       case FileType.audio:
         return AudioPlayer(

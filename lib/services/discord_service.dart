@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -321,7 +322,7 @@ class DiscordService {
     );
   }
 
-  /// Telecharge un fichier complet - gere les gros fichiers via streaming
+  /// Telecharge un fichier complet - avec telechargement parallele
   Future<Uint8List> downloadFile(
     List<String> urls, {
     bool isCompressed = false,
@@ -329,119 +330,152 @@ class DiscordService {
     String? encryptionKey,
     Function(double)? onProgress,
     CancelToken? cancelToken,
+    int maxParallel = 4, // Nombre de telechargements paralleles
   }) async {
-    debugPrint('Starting download: ${urls.length} chunks');
+    debugPrint('Starting download: ${urls.length} chunks (parallel: $maxParallel)');
     
-    // Pour les gros fichiers (>100MB ou >10 chunks), utiliser le streaming vers fichier
     final totalChunks = urls.length;
     final estimatedSize = metadata['originalSize'] as int? ?? 0;
-    
-    if (totalChunks > 10 || estimatedSize > 100 * 1024 * 1024) {
-      return _downloadLargeFile(urls, isCompressed: isCompressed, metadata: metadata, encryptionKey: encryptionKey, onProgress: onProgress, cancelToken: cancelToken);
-    }
-
-    // Pour les petits fichiers, telechargement en memoire
-    final List<Uint8List> chunks = [];
     final wasRandomized = metadata['randomizedChunks'] == true;
-
-    for (int i = 0; i < urls.length; i++) {
-      if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
-      
-      debugPrint('Downloading chunk ${i + 1}/${urls.length}');
-
-      Uint8List? data;
-      int retries = 0;
-
-      while (data == null && retries < _maxRetries) {
-        try {
-          final response = await _dio.get<List<int>>(
-            urls[i],
-            options: Options(responseType: ResponseType.bytes),
-            cancelToken: cancelToken,
-            onReceiveProgress: (recv, total) {
-              if (onProgress != null) {
-                final chunkProgress = total > 0 ? recv / total : 0.0;
-                onProgress((i + chunkProgress) / urls.length);
-              }
-            },
-          );
-          if (response.data != null && response.data!.isNotEmpty) {
-            data = Uint8List.fromList(response.data!);
-            debugPrint('Chunk $i downloaded: ${data.length} bytes');
-          }
-        } on DioException catch (e) {
-          if (e.type == DioExceptionType.cancel) rethrow;
-          if (e.response?.statusCode == 404) {
-            // Essayer URL de redundance si disponible
-            final redundantUrls = metadata['redundantUrls_$i'] as List<String>?;
-            if (redundantUrls != null && redundantUrls.isNotEmpty) {
-              debugPrint('Trying redundant URL for chunk $i');
-              try {
-                final response = await _dio.get<List<int>>(redundantUrls.first, options: Options(responseType: ResponseType.bytes));
-                if (response.data != null) data = Uint8List.fromList(response.data!);
-              } catch (_) {}
-            }
-            if (data == null) throw Exception('File chunk $i deleted from Discord');
-          }
-          retries++;
-          if (retries >= _maxRetries) throw Exception('Download chunk $i failed after $retries retries');
-          debugPrint('Retry $retries for chunk $i');
-          await Future.delayed(_retryDelay * retries);
-        }
-      }
-      if (data == null) throw Exception('No data for chunk $i');
-      chunks.add(data);
+    
+    // Pour les gros fichiers, utiliser le telechargement parallele avec streaming
+    if (totalChunks > 10 || estimatedSize > 100 * 1024 * 1024) {
+      return _downloadParallelLargeFile(
+        urls, 
+        maxParallel: maxParallel,
+        isCompressed: isCompressed, 
+        metadata: metadata, 
+        encryptionKey: encryptionKey, 
+        onProgress: onProgress, 
+        cancelToken: cancelToken,
+      );
     }
+
+    // Pour les petits fichiers, telechargement parallele en memoire
+    final chunks = await _downloadChunksParallel(
+      urls, 
+      maxParallel: maxParallel,
+      metadata: metadata,
+      onProgress: onProgress,
+      cancelToken: cancelToken,
+    );
 
     debugPrint('All chunks downloaded, merging...');
     return _processDownloadedData(chunks, wasRandomized, isCompressed, metadata, encryptionKey);
   }
 
-  /// Telechargement de gros fichiers avec streaming vers fichier temporaire
-  Future<Uint8List> _downloadLargeFile(
+  /// Telecharge les chunks en parallele
+  Future<List<Uint8List>> _downloadChunksParallel(
     List<String> urls, {
+    required int maxParallel,
+    required Map<String, dynamic> metadata,
+    Function(double)? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    final results = List<Uint8List?>.filled(urls.length, null);
+    final queue = List<int>.generate(urls.length, (i) => i);
+    int completed = 0;
+    int activeDownloads = 0;
+    final completer = Completer<void>();
+    
+    Future<void> downloadWorker() async {
+      while (queue.isNotEmpty && !(cancelToken?.isCancelled ?? false)) {
+        final index = queue.removeAt(0);
+        activeDownloads++;
+        
+        try {
+          final data = await _downloadSingleChunk(
+            urls[index], 
+            index, 
+            urls.length, 
+            (p) {
+              // Progress pour ce chunk
+            },
+            cancelToken,
+            metadata: metadata,
+          );
+          
+          results[index] = data;
+          completed++;
+          onProgress?.call(completed / urls.length);
+          debugPrint('Chunk $index completed ($completed/${urls.length})');
+          
+        } catch (e) {
+          debugPrint('Chunk $index failed: $e');
+          // Re-ajouter a la queue pour retry
+          if (!queue.contains(index)) {
+            queue.add(index);
+          }
+        }
+        
+        activeDownloads--;
+      }
+    }
+    
+    // Lancer les workers en parallele
+    final workers = <Future>[];
+    for (int i = 0; i < maxParallel.clamp(1, urls.length); i++) {
+      workers.add(downloadWorker());
+    }
+    
+    await Future.wait(workers);
+    
+    if (cancelToken?.isCancelled ?? false) {
+      throw Exception('Cancelled');
+    }
+    
+    // Verifier que tout est telecharge
+    for (int i = 0; i < results.length; i++) {
+      if (results[i] == null) {
+        throw Exception('Missing chunk $i');
+      }
+    }
+    
+    return results.cast<Uint8List>();
+  }
+
+  /// Telechargement parallele de gros fichiers avec streaming vers fichier temporaire
+  Future<Uint8List> _downloadParallelLargeFile(
+    List<String> urls, {
+    int maxParallel = 4,
     bool isCompressed = false,
     Map<String, dynamic> metadata = const {},
     String? encryptionKey,
     Function(double)? onProgress,
     CancelToken? cancelToken,
   }) async {
-    debugPrint('Large file download: ${urls.length} chunks');
+    debugPrint('Large file parallel download: ${urls.length} chunks (parallel: $maxParallel)');
     
     final tempDir = await getTemporaryDirectory();
+    final wasRandomized = metadata['randomizedChunks'] == true;
+    
+    // Telecharger tous les chunks en parallele
+    final chunks = await _downloadChunksParallel(
+      urls,
+      maxParallel: maxParallel,
+      metadata: metadata,
+      onProgress: onProgress,
+      cancelToken: cancelToken,
+    );
+    
+    // Si randomized, reordonner
+    if (wasRandomized) {
+      return _processDownloadedData(chunks, true, isCompressed, metadata, encryptionKey);
+    }
+    
+    // Sauvegarder dans un fichier temporaire pour eviter les problemes memoire
     final tempFile = File('${tempDir.path}/discloud_download_${DateTime.now().millisecondsSinceEpoch}.tmp');
     final sink = tempFile.openWrite();
     
     try {
-      final wasRandomized = metadata['randomizedChunks'] == true;
-      
-      // Si randomized, on doit tout mettre en memoire pour reordonner
-      if (wasRandomized) {
-        final chunks = <Uint8List>[];
-        for (int i = 0; i < urls.length; i++) {
-          if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
-          final chunk = await _downloadSingleChunk(urls[i], i, urls.length, onProgress, cancelToken);
-          chunks.add(chunk);
-        }
-        await sink.close();
-        await tempFile.delete();
-        return _processDownloadedData(chunks, true, isCompressed, metadata, encryptionKey);
-      }
-      
-      // Sinon, streaming direct vers fichier
-      int totalDownloaded = 0;
-      for (int i = 0; i < urls.length; i++) {
-        if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
-        
-        debugPrint('Downloading chunk ${i + 1}/${urls.length}');
-        final chunk = await _downloadSingleChunk(urls[i], i, urls.length, onProgress, cancelToken);
+      int totalWritten = 0;
+      for (final chunk in chunks) {
         sink.add(chunk);
-        totalDownloaded += chunk.length;
-        debugPrint('Progress: ${(totalDownloaded / 1024 / 1024).toStringAsFixed(1)} MB');
+        totalWritten += chunk.length;
       }
       
       await sink.close();
-      debugPrint('All chunks saved to temp file');
+      debugPrint('All chunks saved to temp file: ${(totalWritten / 1024 / 1024).toStringAsFixed(1)} MB');
       
       // Lire le fichier complet
       var result = await tempFile.readAsBytes();
@@ -460,7 +494,14 @@ class DiscordService {
     }
   }
 
-  Future<Uint8List> _downloadSingleChunk(String url, int index, int total, Function(double)? onProgress, CancelToken? cancelToken) async {
+  Future<Uint8List> _downloadSingleChunk(
+    String url, 
+    int index, 
+    int total, 
+    Function(double)? onProgress, 
+    CancelToken? cancelToken, {
+    Map<String, dynamic>? metadata,
+  }) async {
     int retries = 0;
     
     while (retries < _maxRetries) {
@@ -482,6 +523,19 @@ class DiscordService {
         }
       } on DioException catch (e) {
         if (e.type == DioExceptionType.cancel) rethrow;
+        
+        // Essayer URL de redundance si 404
+        if (e.response?.statusCode == 404 && metadata != null) {
+          final redundantUrls = metadata['redundantUrls_$index'] as List<String>?;
+          if (redundantUrls != null && redundantUrls.isNotEmpty) {
+            debugPrint('Trying redundant URL for chunk $index');
+            try {
+              final response = await _dio.get<List<int>>(redundantUrls.first, options: Options(responseType: ResponseType.bytes));
+              if (response.data != null) return Uint8List.fromList(response.data!);
+            } catch (_) {}
+          }
+        }
+        
         retries++;
         if (retries >= _maxRetries) {
           throw Exception('Download chunk $index failed after $retries retries: ${e.message}');
