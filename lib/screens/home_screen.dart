@@ -634,19 +634,51 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     final savePath = await FilePicker.platform.getDirectoryPath();
     if (savePath == null) return;
 
+    // Afficher un indicateur de progression
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Downloading ${_selectedFiles.length} file(s)...'), duration: const Duration(seconds: 30)),
+      );
+    }
+
+    int downloaded = 0;
+    int failed = 0;
+    
     for (final path in _selectedFiles.toList()) {
-      final file = provider.currentFiles.firstWhere((f) => f.path == path);
+      final file = provider.currentFiles.where((f) => f.path == path).firstOrNull;
+      if (file == null) {
+        failed++;
+        continue;
+      }
       if (!file.isDirectory) {
-        final data = await provider.downloadFile(file);
-        if (data != null) {
-          final outFile = File('$savePath/${file.name}');
-          await outFile.writeAsBytes(data);
+        try {
+          final data = await provider.downloadFile(file);
+          if (data != null) {
+            final outFile = File('$savePath/${file.name}');
+            await outFile.writeAsBytes(data);
+            downloaded++;
+          } else {
+            failed++;
+          }
+        } catch (e) {
+          debugPrint('Download failed for ${file.name}: $e');
+          failed++;
         }
       }
     }
 
     setState(() { _selectionMode = false; _selectedFiles.clear(); });
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download complete!'), backgroundColor: Colors.green));
+    if (mounted) {
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(failed > 0 
+            ? 'Downloaded $downloaded file(s), $failed failed' 
+            : 'Downloaded $downloaded file(s)!'),
+          backgroundColor: failed > 0 ? Colors.orange : Colors.green,
+        ),
+      );
+    }
   }
 
   Future<void> _deleteSelected() async {
@@ -664,11 +696,20 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
 
     if (confirm == true) {
+      int deleted = 0;
       for (final path in _selectedFiles.toList()) {
-        final file = provider.currentFiles.firstWhere((f) => f.path == path);
-        await provider.deleteFile(file);
+        final file = provider.currentFiles.where((f) => f.path == path).firstOrNull;
+        if (file != null) {
+          await provider.deleteFile(file);
+          deleted++;
+        }
       }
       setState(() { _selectionMode = false; _selectedFiles.clear(); });
+      if (mounted && deleted > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Deleted $deleted item(s)'), backgroundColor: Colors.green),
+        );
+      }
     }
   }
 

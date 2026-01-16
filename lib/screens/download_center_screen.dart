@@ -1034,7 +1034,7 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
       children: [
         Text('${_extractedVideos!.length} formats found', style: const TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 12),
-        ...extractedVideos!.take(5).map((v) => Card(
+        ..._extractedVideos!.take(5).map((v) => Card(
           child: ListTile(
             leading: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1059,7 +1059,25 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
   // Actions
   Future<void> _downloadDirect() async {
     final url = _urlController.text.trim();
-    if (url.isEmpty) return;
+    if (url.isEmpty) {
+      setState(() => _error = 'Please enter a URL');
+      return;
+    }
+    
+    // Valider l'URL
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      setState(() => _error = 'URL must start with http:// or https://');
+      return;
+    }
+
+    Uri parsedUrl;
+    try {
+      parsedUrl = Uri.parse(url);
+      if (parsedUrl.host.isEmpty) throw FormatException('Invalid URL');
+    } catch (e) {
+      setState(() => _error = 'Invalid URL format');
+      return;
+    }
 
     setState(() {
       _isDownloading = true;
@@ -1070,7 +1088,7 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
 
     try {
       final provider = context.read<CloudProvider>();
-      final filename = Uri.parse(url).pathSegments.lastOrNull ?? 'file';
+      final filename = parsedUrl.pathSegments.lastOrNull ?? 'file';
 
       await _downloader.downloadAndUpload(
         url: url,

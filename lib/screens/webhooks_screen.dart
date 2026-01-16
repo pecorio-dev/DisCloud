@@ -65,6 +65,8 @@ class WebhooksScreen extends StatelessWidget {
   void _showAddWebhookDialog(BuildContext context) {
     final urlController = TextEditingController();
     final nameController = TextEditingController();
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    final provider = context.read<CloudProvider>();
 
     showDialog(
       context: context,
@@ -99,21 +101,42 @@ class WebhooksScreen extends StatelessWidget {
           ),
           ElevatedButton(
             onPressed: () async {
-              if (urlController.text.isNotEmpty) {
-                Navigator.pop(ctx);
-                final provider = context.read<CloudProvider>();
-                final success = await provider.addWebhook(
-                  urlController.text,
-                  name: nameController.text.isEmpty ? null : nameController.text,
+              final url = urlController.text.trim();
+              if (url.isEmpty) {
+                scaffoldMessenger.showSnackBar(
+                  const SnackBar(content: Text('Please enter a webhook URL'), backgroundColor: Colors.orange),
                 );
-                if (!success && context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(provider.errorMessage ?? 'Failed to add webhook'),
-                      backgroundColor: Colors.red,
-                    ),
-                  );
-                }
+                return;
+              }
+              if (!url.contains('discord.com/api/webhooks/')) {
+                scaffoldMessenger.showSnackBar(
+                  const SnackBar(content: Text('Invalid Discord webhook URL'), backgroundColor: Colors.red),
+                );
+                return;
+              }
+              
+              Navigator.pop(ctx);
+              scaffoldMessenger.showSnackBar(
+                const SnackBar(content: Text('Adding webhook...'), duration: Duration(seconds: 10)),
+              );
+              
+              final success = await provider.addWebhook(
+                url,
+                name: nameController.text.isEmpty ? null : nameController.text,
+              );
+              
+              scaffoldMessenger.hideCurrentSnackBar();
+              if (success) {
+                scaffoldMessenger.showSnackBar(
+                  const SnackBar(content: Text('Webhook added successfully!'), backgroundColor: Colors.green),
+                );
+              } else {
+                scaffoldMessenger.showSnackBar(
+                  SnackBar(
+                    content: Text(provider.errorMessage ?? 'Failed to add webhook'),
+                    backgroundColor: Colors.red,
+                  ),
+                );
               }
             },
             child: const Text('Add'),
