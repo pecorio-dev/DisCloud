@@ -259,16 +259,14 @@ class UniversalDownloader extends ChangeNotifier {
     }
   }
 
-  /// Extrait les informations video depuis une URL
+  /// Extrait les informations video depuis une URL (100% yt-dlp)
   Future<List<ExtractedVideo>> extractVideoInfo(String url) async {
-    final type = DownloadSource.detectType(url);
-    
-    if (_ytDlpAvailable && (type == DownloadSourceType.youtube || type == DownloadSourceType.video)) {
-      return _extractWithYtDlp(url);
+    if (!_ytDlpAvailable || _ytDlpPath == null) {
+      debugPrint('yt-dlp not available');
+      throw Exception('yt-dlp is not installed. Please install it from the Tools tab.');
     }
     
-    // Fallback: extraction manuelle pour certains sites
-    return _extractManually(url);
+    return _extractWithYtDlp(url);
   }
 
   Future<List<ExtractedVideo>> _extractWithYtDlp(String url) async {
@@ -388,15 +386,13 @@ class UniversalDownloader extends ChangeNotifier {
         debugPrint('Exit code: ${result.exitCode}');
         debugPrint('Stdout: ${result.stdout}');
         debugPrint('Stderr: ${result.stderr}');
+        throw Exception('yt-dlp failed: ${result.stderr}');
       }
     } catch (e, stack) {
       debugPrint('yt-dlp extraction error: $e');
       debugPrint('Stack: $stack');
+      rethrow;
     }
-    
-    // Si yt-dlp echoue, essayer l'extraction manuelle
-    debugPrint('Trying manual extraction...');
-    return _extractManually(url);
   }
 
   /// Telecharge une video avec yt-dlp directement (sans extraire d'abord)
@@ -480,87 +476,37 @@ class UniversalDownloader extends ChangeNotifier {
       
     } catch (e) {
       debugPrint('yt-dlp download error: $e');
+      rethrow;
     }
-    
-    return null;
   }
 
-  Future<List<ExtractedVideo>> _extractManually(String url) async {
-    // Extraction manuelle pour certains sites sans yt-dlp
-    debugPrint('Manual extraction for: $url');
-    
-    try {
-      final response = await _dio.get(
-        url,
-        options: Options(
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': url,
-          },
-        ),
-      );
-      final html = response.data.toString();
-      debugPrint('Page loaded, ${html.length} chars');
-      
-      // Chercher des patterns de video
-      final videoUrls = <String>[];
-      
-      // Pattern simple pour les URLs video
-      final urlPattern = RegExp(r'https?://[^\s"<>]+\.(mp4|m3u8|webm)[^\s"<>]*', caseSensitive: false);
-      
-      for (final match in urlPattern.allMatches(html)) {
-        var u = match.group(0)!;
-        // Nettoyer les caracteres d'echappement
-        u = u.replaceAll(r'\/', '/').replaceAll(r'\"', '');
-        // Couper aux caracteres invalides
-        for (final c in ['"', "'", ' ', ')', '<', '>']) {
-          final idx = u.indexOf(c);
-          if (idx > 0) u = u.substring(0, idx);
-        }
-        
-        if (u.startsWith('http') && !videoUrls.contains(u)) {
-          videoUrls.add(u);
-        }
-      }
-      
-      debugPrint('Found ${videoUrls.length} video URLs manually');
-
-      return videoUrls.map((u) => ExtractedVideo(
-        title: Uri.parse(url).host,
-        url: u,
-        quality: u.contains('1080') ? '1080p' : (u.contains('720') ? '720p' : 'unknown'),
-        format: u.contains('.m3u8') ? 'm3u8' : (u.contains('.webm') ? 'webm' : 'mp4'),
-      )).toList();
-
-    } catch (e) {
-      debugPrint('Manual extraction failed: $e');
+  /// Telecharge directement la video avec yt-dlp et retourne les bytes
+  Future<Uint8List> downloadVideoBytes(
+    String url, {
+    String? quality,
+    Function(double, String)? onProgress,
+  }) async {
+    if (!_ytDlpAvailable || _ytDlpPath == null) {
+      throw Exception('yt-dlp is not installed');
     }
     
-    return [];
-  }
-
-  String _decodePackedJs(String packed) {
-    // Decodeur basique pour le JS packe
-    try {
-      final match = RegExp(r"\('([^']+)',(\d+),(\d+),'([^']+)'").firstMatch(packed);
-      if (match == null) return '';
-      
-      final p = match.group(1)!;
-      final a = int.parse(match.group(2)!);
-      final c = int.parse(match.group(3)!);
-      final k = match.group(4)!.split('|');
-      
-      var result = p;
-      for (int i = c - 1; i >= 0; i--) {
-        if (k[i].isNotEmpty) {
-          final pattern = RegExp('\\b${i.toRadixString(a)}\\b');
-          result = result.replaceAll(pattern, k[i]);
-        }
-      }
-      return result;
-    } catch (e) {
-      return '';
+    final file = await downloadVideoWithYtDlp(
+      url,
+      quality: quality,
+      onProgress: (p) => onProgress?.call(p, 'Downloading...'),
+    );
+    
+    if (file == null || !await file.exists()) {
+      throw Exception('Failed to download video');
     }
+    
+    onProgress?.call(1.0, 'Reading file...');
+    final bytes = await file.readAsBytes();
+    
+    // Supprimer le fichier temporaire
+    await file.delete();
+    
+    return bytes;
   }
 
   /// Telecharge un fichier avec streaming vers Discord

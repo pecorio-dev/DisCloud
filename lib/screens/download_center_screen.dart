@@ -513,6 +513,8 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
   }
 
   Widget _buildTorrentTab() {
+    final aria2Installed = _depManager.aria2.status == DependencyStatus.installed;
+    
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -526,20 +528,76 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
                   children: [
                     const Text('Torrent to Discord', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 4),
-                    Text(
-                      _torrentService.isRunning ? 'Service running' : 'Service stopped',
-                      style: TextStyle(color: _torrentService.isRunning ? Colors.green : Colors.grey),
+                    Row(
+                      children: [
+                        if (aria2Installed) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.green.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.check, size: 12, color: Colors.green),
+                                const SizedBox(width: 4),
+                                Text('aria2 ready', style: TextStyle(fontSize: 10, color: Colors.green.shade700)),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _torrentService.isRunning ? 'Service running' : 'Service stopped',
+                            style: TextStyle(fontSize: 12, color: _torrentService.isRunning ? Colors.green : Colors.grey),
+                          ),
+                        ] else
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.warning, size: 12, color: Colors.orange),
+                                const SizedBox(width: 4),
+                                Text('aria2 needed', style: TextStyle(fontSize: 10, color: Colors.orange.shade700)),
+                              ],
+                            ),
+                          ),
+                      ],
                     ),
                   ],
                 ),
               ),
-              Switch(
-                value: _torrentService.isRunning,
-                onChanged: (v) async {
-                  if (v) await _torrentService.start();
-                  else await _torrentService.stop();
-                },
-              ),
+              if (aria2Installed)
+                Switch(
+                  value: _torrentService.isRunning,
+                  onChanged: (v) async {
+                    if (v) {
+                      _torrentService.setAria2Path(_depManager.aria2Path!);
+                      await _torrentService.start();
+                    } else {
+                      await _torrentService.stop();
+                    }
+                    setState(() {});
+                  },
+                )
+              else
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    await _installDependency('aria2');
+                    setState(() {});
+                  },
+                  icon: const Icon(Icons.download, size: 16),
+                  label: const Text('Install'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
             ],
           ),
           
@@ -548,50 +606,8 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
           
           const SizedBox(height: 24),
           
-          TextField(
-            controller: _urlController,
-            decoration: InputDecoration(
-              labelText: 'Magnet Link or Torrent URL',
-              hintText: 'magnet:?xt=urn:btih:...',
-              prefixIcon: const Icon(Icons.link),
-              suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: () async {
-                final data = await Clipboard.getData('text/plain');
-                if (data?.text != null) _urlController.text = data!.text!;
-              }),
-              border: const OutlineInputBorder(),
-            ),
-            maxLines: 3,
-          ),
-          
-          const SizedBox(height: 16),
-          
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _torrentService.isRunning ? _addTorrent : null,
-              icon: const Icon(Icons.add),
-              label: const Text('Add Torrent'),
-              style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
-            ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          if (_torrentService.torrents.isNotEmpty) ...[
-            const Text('Active Torrents', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            ...torrentService.torrents.map((t) => _TorrentCard(
-              info: t,
-              onPause: () => _torrentService.pauseTorrent(t.infoHash),
-              onResume: () => _torrentService.resumeTorrent(t.infoHash),
-              onRemove: () => _torrentService.removeTorrent(t.infoHash),
-              onUploadToDiscord: () => _uploadTorrentToDiscord(t),
-            )),
-          ],
-          
-          if (!_torrentService.isRunning)
+          if (!aria2Installed)
             Container(
-              margin: const EdgeInsets.only(top: 24),
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 color: Colors.orange.withOpacity(0.1),
@@ -600,19 +616,73 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
               ),
               child: Column(
                 children: [
-                  const Icon(Icons.info, color: Colors.orange),
+                  const Icon(Icons.info, color: Colors.orange, size: 32),
                   const SizedBox(height: 8),
-                  const Text('Requires aria2c', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Text('aria2 Required', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 4),
-                  const Text('Install aria2 to enable torrent downloads', style: TextStyle(fontSize: 12)),
-                  const SizedBox(height: 12),
-                  OutlinedButton(
-                    onPressed: () => _openUrl('https://aria2.github.io/'),
-                    child: const Text('Download aria2'),
-                  ),
+                  const Text('Click the Install button above to download aria2 automatically.', style: TextStyle(fontSize: 12), textAlign: TextAlign.center),
                 ],
               ),
+            )
+          else ...[
+            TextField(
+              controller: _urlController,
+              decoration: InputDecoration(
+                labelText: 'Magnet Link or Torrent URL',
+                hintText: 'magnet:?xt=urn:btih:...',
+                prefixIcon: const Icon(Icons.link),
+                suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: () async {
+                  final data = await Clipboard.getData('text/plain');
+                  if (data?.text != null) _urlController.text = data!.text!;
+                }),
+              border: const OutlineInputBorder(),
             ),
+            maxLines: 3,
+          ),
+          
+            const SizedBox(height: 16),
+            
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _torrentService.isRunning ? _addTorrent : null,
+                icon: const Icon(Icons.add),
+                label: const Text('Add Torrent'),
+                style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+              ),
+            ),
+            
+            const SizedBox(height: 24),
+            
+            if (_torrentService.torrents.isNotEmpty) ...[
+              const Text('Active Torrents', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              ...torrentService.torrents.map((t) => _TorrentCard(
+                info: t,
+                onPause: () => _torrentService.pauseTorrent(t.infoHash),
+                onResume: () => _torrentService.resumeTorrent(t.infoHash),
+                onRemove: () => _torrentService.removeTorrent(t.infoHash),
+                onUploadToDiscord: () => _uploadTorrentToDiscord(t),
+              )),
+            ],
+            
+            if (!_torrentService.isRunning && aria2Installed)
+              Container(
+                margin: const EdgeInsets.only(top: 16),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: const [
+                    Icon(Icons.info, color: Colors.blue),
+                    SizedBox(width: 12),
+                    Expanded(child: Text('Enable the service (switch above) to start downloading torrents.', style: TextStyle(fontSize: 12))),
+                  ],
+                ),
+              ),
+          ],
         ],
       ),
     );
