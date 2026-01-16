@@ -259,14 +259,37 @@ class UniversalDownloader extends ChangeNotifier {
     }
   }
 
-  /// Extrait les informations video depuis une URL (100% yt-dlp)
+  /// Extrait les informations video depuis une URL
+  /// Utilise yt-dlp en priorite, puis fallback vers extraction manuelle pour certains sites
   Future<List<ExtractedVideo>> extractVideoInfo(String url) async {
+    // Detecter le type de site
+    final lowerUrl = url.toLowerCase();
+    final isUqload = lowerUrl.contains('uqload');
+    final isDoodstream = lowerUrl.contains('dood') || lowerUrl.contains('dstream') || lowerUrl.contains('ds2play');
+    final isStreamtape = lowerUrl.contains('streamtape');
+    
+    // Essayer d'abord avec yt-dlp si disponible
+    if (_ytDlpAvailable && _ytDlpPath != null) {
+      try {
+        final results = await _extractWithYtDlp(url);
+        if (results.isNotEmpty) return results;
+      } catch (e) {
+        debugPrint('yt-dlp extraction failed: $e');
+      }
+    }
+    
+    // Fallback: extraction manuelle pour sites specifiques
+    if (isUqload || isDoodstream || isStreamtape) {
+      debugPrint('Using manual extraction for: $url');
+      return _extractManuallyForHosters(url);
+    }
+    
+    // Si yt-dlp echoue et pas de fallback possible
     if (!_ytDlpAvailable || _ytDlpPath == null) {
-      debugPrint('yt-dlp not available');
       throw Exception('yt-dlp is not installed. Please install it from the Tools tab.');
     }
     
-    return _extractWithYtDlp(url);
+    throw Exception('Could not extract video from this URL. Site may not be supported.');
   }
 
   Future<List<ExtractedVideo>> _extractWithYtDlp(String url) async {
@@ -489,6 +512,171 @@ class UniversalDownloader extends ChangeNotifier {
       debugPrint('yt-dlp download error: $e');
       rethrow;
     }
+  }
+
+  /// Extraction manuelle pour hosters video (Uqload, Doodstream, Streamtape)
+  Future<List<ExtractedVideo>> _extractManuallyForHosters(String url) async {
+    debugPrint('=== Manual extraction for hosters ===');
+    debugPrint('URL: $url');
+    
+    try {
+      final response = await _dio.get(
+        url,
+        options: Options(
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': url,
+          },
+          followRedirects: true,
+          validateStatus: (_) => true,
+        ),
+      );
+      
+      final html = response.data.toString();
+      debugPrint('Page loaded: ${html.length} chars');
+      
+      final lowerUrl = url.toLowerCase();
+      final videos = <ExtractedVideo>[];
+      
+      // === UQLOAD ===
+      if (lowerUrl.contains('uqload')) {
+        // Pattern 1: sources: [{src:"URL"}]
+        final sourcesPattern = RegExp('sources:\\s*\\[\\s*\\{\\s*src\\s*:\\s*"([^"]+)"');
+        final sourcesMatch = sourcesPattern.firstMatch(html);
+        if (sourcesMatch != null) {
+          final videoUrl = sourcesMatch.group(1)!;
+          debugPrint('Uqload sources found: $videoUrl');
+          videos.add(ExtractedVideo(
+            title: _extractTitle(html) ?? 'Uqload Video',
+            url: videoUrl,
+            quality: 'HD',
+            format: 'mp4',
+            headers: {'Referer': url},
+          ));
+        }
+        
+        // Pattern 2: player.src({src:"URL"})
+        final playerPattern = RegExp('player\\.src\\s*\\(\\s*\\{\\s*src\\s*:\\s*"([^"]+)"');
+        final playerMatch = playerPattern.firstMatch(html);
+        if (playerMatch != null && videos.isEmpty) {
+          final videoUrl = playerMatch.group(1)!;
+          debugPrint('Uqload player.src found: $videoUrl');
+          videos.add(ExtractedVideo(
+            title: _extractTitle(html) ?? 'Uqload Video',
+            url: videoUrl,
+            quality: 'HD',
+            format: 'mp4',
+            headers: {'Referer': url},
+          ));
+        }
+      }
+      
+      // === DOODSTREAM ===
+      if (lowerUrl.contains('dood') || lowerUrl.contains('dstream') || lowerUrl.contains('ds2play')) {
+        // Doodstream utilise une URL dynamique generee par JS
+        // On cherche le pattern /pass_md5/
+        final md5Pattern = RegExp('/pass_md5/[^"\'\\s]+');
+        final md5Match = md5Pattern.firstMatch(html);
+        if (md5Match != null) {
+          var passUrl = md5Match.group(0)!;
+          if (!passUrl.startsWith('http')) {
+            passUrl = 'https://dood.re$passUrl';
+          }
+          
+          debugPrint('Doodstream pass_md5 URL: $passUrl');
+          
+          // Recuperer l'URL finale
+          try {
+            final passResponse = await _dio.get(
+              passUrl,
+              options: Options(headers: {'Referer': url}),
+            );
+            final token = passResponse.data.toString();
+            
+            // Generer l'URL video avec token + timestamp
+            final timestamp = DateTime.now().millisecondsSinceEpoch;
+            final videoUrl = '$token${_randomString(10)}?token=$timestamp&expiry=$timestamp';
+            
+            videos.add(ExtractedVideo(
+              title: _extractTitle(html) ?? 'Doodstream Video',
+              url: videoUrl,
+              quality: 'HD',
+              format: 'mp4',
+              headers: {'Referer': url},
+            ));
+          } catch (e) {
+            debugPrint('Doodstream pass_md5 failed: $e');
+          }
+        }
+      }
+      
+      // === STREAMTAPE ===
+      if (lowerUrl.contains('streamtape')) {
+        // Pattern: get_video?...
+        final tapePattern = RegExp('//[^"\'\\s]+get_video[^"\'\\s]+');
+        final tapeMatch = tapePattern.firstMatch(html);
+        if (tapeMatch != null) {
+          var videoPath = tapeMatch.group(0)!;
+          if (!videoPath.startsWith('http')) {
+            videoPath = 'https:$videoPath';
+          }
+          debugPrint('Streamtape URL found: $videoPath');
+          videos.add(ExtractedVideo(
+            title: _extractTitle(html) ?? 'Streamtape Video',
+            url: videoPath,
+            quality: 'HD',
+            format: 'mp4',
+            headers: {'Referer': url},
+          ));
+        }
+      }
+      
+      // === GENERIC: chercher des URLs video directes ===
+      if (videos.isEmpty) {
+        final urlPattern = RegExp('https?://[^\\s"\'<>]+\\.(mp4|m3u8|webm)', caseSensitive: false);
+        for (final match in urlPattern.allMatches(html)) {
+          var videoUrl = match.group(0)!;
+          // Nettoyer
+          videoUrl = videoUrl.replaceAll('\\/', '/');
+          if (!videos.any((v) => v.url == videoUrl)) {
+            videos.add(ExtractedVideo(
+              title: _extractTitle(html) ?? 'Video',
+              url: videoUrl,
+              quality: videoUrl.contains('1080') ? '1080p' : (videoUrl.contains('720') ? '720p' : 'HD'),
+              format: videoUrl.contains('.m3u8') ? 'm3u8' : 'mp4',
+              headers: {'Referer': url},
+            ));
+          }
+        }
+      }
+      
+      debugPrint('Manual extraction found ${videos.length} videos');
+      return videos;
+      
+    } catch (e) {
+      debugPrint('Manual extraction error: $e');
+      return [];
+    }
+  }
+  
+  String? _extractTitle(String html) {
+    final titleMatch = RegExp(r'<title>([^<]+)</title>', caseSensitive: false).firstMatch(html);
+    if (titleMatch != null) {
+      var title = titleMatch.group(1)!;
+      // Nettoyer le titre
+      title = title.replaceAll(RegExp(r'\s*[-|]\s*(Watch|Download|Stream|Free|Online).*', caseSensitive: false), '');
+      title = title.replaceAll(RegExp(r'\s*(Watch|Download|Stream|Free|Online)\s*', caseSensitive: false), '');
+      return title.trim().isEmpty ? null : title.trim();
+    }
+    return null;
+  }
+  
+  String _randomString(int length) {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final random = DateTime.now().millisecondsSinceEpoch;
+    return List.generate(length, (i) => chars[(random + i * 7) % chars.length]).join();
   }
 
   /// Telecharge directement la video avec yt-dlp et retourne les bytes
