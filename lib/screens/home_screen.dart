@@ -5,12 +5,14 @@ import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import '../providers/cloud_provider.dart';
 import '../models/cloud_file.dart';
+import '../models/upload_options.dart';
 import '../services/share_link_service.dart';
 import 'file_viewer_screen.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
 import 'webhooks_screen.dart';
 import 'sync_screen.dart';
+import 'upload_options_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -200,6 +202,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _ToolbarButton(icon: Icons.create_new_folder, label: 'New Folder', onPressed: _createFolder),
           _ToolbarButton(icon: Icons.link, label: 'From URL', onPressed: _uploadFromUrl),
           const VerticalDivider(width: 16),
+          _ToolbarButton(icon: Icons.tune, label: 'Options', onPressed: _openUploadOptions),
           _ToolbarButton(icon: Icons.checklist, label: 'Select', onPressed: () => setState(() => _selectionMode = true)),
           _ToolbarButton(icon: Icons.sync, label: 'Sync', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncScreen()))),
           const Spacer(),
@@ -589,6 +592,24 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
+  }
+
+  void _openUploadOptions() {
+    final provider = context.read<CloudProvider>();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => UploadOptionsScreen(
+          options: provider.uploadOptions,
+          onSave: (options) {
+            provider.setUploadOptions(options);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Upload options saved!'), backgroundColor: Colors.green),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   String _formatSize(int bytes) {

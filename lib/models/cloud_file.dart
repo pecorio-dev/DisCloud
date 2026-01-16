@@ -10,7 +10,9 @@ class CloudFile {
   final List<String> messageIds;
   final String? mimeType;
   final bool isCompressed;
-  final String webhookId; // ID du webhook qui contient ce fichier
+  final String webhookId;
+  final String? checksum;
+  final Map<String, dynamic> metadata; // Pour stocker les options d'encryption/obfuscation
 
   CloudFile({
     required this.id,
@@ -25,10 +27,17 @@ class CloudFile {
     this.mimeType,
     this.isCompressed = false,
     this.webhookId = '',
+    this.checksum,
+    this.metadata = const {},
   })  : createdAt = createdAt ?? DateTime.now(),
         modifiedAt = modifiedAt ?? DateTime.now();
 
   int get chunkCount => chunkUrls.length;
+  
+  bool get isEncrypted => metadata['encrypted'] != null;
+  bool get hasObfuscation => metadata['contentObfuscation'] != null || metadata['filenameObfuscation'] != null;
+  String? get originalFilename => metadata['originalFilename'] as String?;
+  String? get compressionRatio => metadata['compressionRatio'] as String?;
 
   factory CloudFile.fromJson(Map<String, dynamic> json) {
     return CloudFile(
@@ -48,6 +57,8 @@ class CloudFile {
       mimeType: json['t'] ?? json['mimeType'],
       isCompressed: json['z'] ?? json['isCompressed'] ?? false,
       webhookId: json['w'] ?? json['webhookId'] ?? '',
+      checksum: json['h'] ?? json['checksum'],
+      metadata: Map<String, dynamic>.from(json['meta'] ?? json['metadata'] ?? {}),
     );
   }
 
@@ -65,6 +76,8 @@ class CloudFile {
       't': mimeType,
       'z': isCompressed,
       'w': webhookId,
+      if (checksum != null) 'h': checksum,
+      if (metadata.isNotEmpty) 'meta': metadata,
     };
   }
 
@@ -81,6 +94,8 @@ class CloudFile {
     String? mimeType,
     bool? isCompressed,
     String? webhookId,
+    String? checksum,
+    Map<String, dynamic>? metadata,
   }) {
     return CloudFile(
       id: id ?? this.id,
@@ -95,6 +110,8 @@ class CloudFile {
       mimeType: mimeType ?? this.mimeType,
       isCompressed: isCompressed ?? this.isCompressed,
       webhookId: webhookId ?? this.webhookId,
+      checksum: checksum ?? this.checksum,
+      metadata: metadata ?? this.metadata,
     );
   }
 

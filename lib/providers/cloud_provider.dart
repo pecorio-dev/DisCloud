@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/cloud_file.dart';
+import '../models/upload_options.dart';
 import '../services/discord_service.dart';
 
 enum CloudStatus { idle, loading, uploading, downloading, syncing, error }
@@ -22,6 +23,8 @@ class CloudIndex {
     'theme': 'system',
     'autoSyncEnabled': false,
     'autoSyncInterval': 30,
+    'uploadOptions': const UploadOptions().toJson(),
+    'encryptionKey': null,
   };
   List<SyncFolder> syncFolders = [];
   DateTime lastModified = DateTime.now();
@@ -120,6 +123,14 @@ class CloudProvider extends ChangeNotifier {
   CloudIndex get _currentIndex => _indexes[_currentWebhookId] ?? CloudIndex();
   Map<String, dynamic> get settings => _currentIndex.settings;
   List<SyncFolder> get syncFolders => _currentIndex.syncFolders;
+  
+  UploadOptions get uploadOptions {
+    final json = settings['uploadOptions'];
+    if (json != null) return UploadOptions.fromJson(json);
+    return const UploadOptions();
+  }
+  
+  String? get encryptionKey => settings['encryptionKey'] as String?;
 
   int get totalFiles => _currentIndex.files.values.where((f) => !f.isDirectory).length;
   int get totalFolders => _currentIndex.files.values.where((f) => f.isDirectory).length;
@@ -523,11 +534,23 @@ class CloudProvider extends ChangeNotifier {
 
   // ==================== UPLOAD ====================
 
-  Future<void> uploadFile(String name, Uint8List data, {String? mimeType}) async {
-    await _uploadFileInternal(name, data, mimeType: mimeType);
+  Future<void> uploadFile(String name, Uint8List data, {String? mimeType, UploadOptions? options}) async {
+    await _uploadFileInternal(name, data, mimeType: mimeType, options: options);
+  }
+  
+  Future<void> setUploadOptions(UploadOptions options) async {
+    _currentIndex.settings['uploadOptions'] = options.toJson();
+    await _saveIndexForWebhook(_currentWebhookId!);
+    notifyListeners();
+  }
+  
+  Future<void> setEncryptionKey(String? key) async {
+    _currentIndex.settings['encryptionKey'] = key;
+    await _saveIndexForWebhook(_currentWebhookId!);
+    notifyListeners();
   }
 
-  Future<void> _uploadFileInternal(String name, Uint8List data, {String? mimeType, String? cloudPath}) async {
+  Future<void> _uploadFileInternal(String name, Uint8List data, {String? mimeType, String? cloudPath, UploadOptions? options}) async {
     if (_currentWebhookId == null) {
       _errorMessage = 'No webhook selected';
       _status = CloudStatus.error;
@@ -539,6 +562,7 @@ class CloudProvider extends ChangeNotifier {
     if (service == null) return;
 
     final path = cloudPath ?? (_currentPath == '/' ? '/$name' : '$_currentPath/$name');
+    final opts = options ?? uploadOptions;
     
     // Si existe, supprimer d'abord
     if (_currentIndex.files.containsKey(path)) {
@@ -552,8 +576,12 @@ class CloudProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      // Utiliser la cle d'encryption des settings si pas specifiee dans options
+      final effectiveOptions = opts.encryptionKey != null ? opts : opts.copyWith(encryptionKey: encryptionKey);
+      
       final result = await service.uploadFile(
         data, name,
+        options: effectiveOptions,
         cancelToken: _cancelToken,
         onProgress: (p) { _progress = p; notifyListeners(); },
       );
@@ -569,6 +597,8 @@ class CloudProvider extends ChangeNotifier {
         mimeType: mimeType,
         isCompressed: result.isCompressed,
         webhookId: _currentWebhookId!,
+        checksum: result.checksum,
+        metadata: result.metadata,
       );
 
       await _saveIndexForWebhook(_currentWebhookId!);
@@ -635,7 +665,7 @@ class CloudProvider extends ChangeNotifier {
 
   // ==================== DOWNLOAD ====================
 
-  Future<Uint8List?> downloadFile(CloudFile file) async {
+  Future<Uint8List?> downloadFile(CloudFile file, {String? decryptionKey}) async {
     final service = _services[file.webhookId.isNotEmpty ? file.webhookId : _currentWebhookId];
     if (service == null || file.chunkUrls.isEmpty) return null;
 
@@ -646,9 +676,14 @@ class CloudProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      // Utiliser la cle de decryption fournie ou celle des settings
+      final key = decryptionKey ?? encryptionKey;
+      
       final data = await service.downloadFile(
         file.chunkUrls,
         isCompressed: file.isCompressed,
+        metadata: file.metadata,
+        encryptionKey: key,
         cancelToken: _cancelToken,
         onProgress: (p) { _progress = p; notifyListeners(); },
       );
