@@ -87,9 +87,13 @@ class TorrentService extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool _isStarting = false;
+  
   /// Demarre le service aria2c
   Future<bool> start() async {
     if (_isRunning) return true;
+    if (_isStarting) return false; // Eviter les doubles appels
+    _isStarting = true;
 
     // Determiner le chemin aria2
     String aria2Executable = _aria2Path ?? 'aria2c';
@@ -207,6 +211,7 @@ class TorrentService extends ChangeNotifier {
           final version = await _rpcCall('aria2.getVersion');
           if (version != null) {
             _isRunning = true;
+            _isStarting = false;
             _startUpdateTimer();
             notifyListeners();
             debugPrint('SUCCESS: aria2c started: ${version['version']}');
@@ -231,6 +236,7 @@ class TorrentService extends ChangeNotifier {
       debugPrint('Stack: $stack');
     }
 
+    _isStarting = false;
     return false;
   }
 

@@ -119,7 +119,7 @@ class DownloadManager extends ChangeNotifier {
         progress: 0,
         downloadedBytes: 0,
         currentChunk: 0,
-        error: null,
+        clearError: true,
       );
       notifyListeners();
       _processQueue();
@@ -165,9 +165,15 @@ class DownloadManager extends ChangeNotifier {
 
     // Initialiser les progressions de chunks
     final initialChunkSizes = List.generate(task.urls.length, (_) => 0);
-    task.initChunkProgresses(initialChunkSizes);
+    final chunkProgresses = List.generate(
+      task.urls.length,
+      (i) => ChunkProgress(index: i, size: initialChunkSizes[i]),
+    );
     
-    _tasks[index] = task.copyWith(status: DownloadStatus.downloading);
+    _tasks[index] = task.copyWith(
+      status: DownloadStatus.downloading,
+      chunkProgresses: chunkProgresses,
+    );
     notifyListeners();
 
     final cancelToken = CancelToken();
@@ -242,7 +248,13 @@ class DownloadManager extends ChangeNotifier {
 
       // Decompress
       if (task.isCompressed) {
-        result = Uint8List.fromList(gzip.decode(result));
+        try {
+          if (result.length > 2 && result[0] == 0x1f && result[1] == 0x8b) {
+            result = Uint8List.fromList(gzip.decode(result));
+          }
+        } catch (e) {
+          debugPrint('Decompression failed: $e');
+        }
       }
 
       // Verify checksum

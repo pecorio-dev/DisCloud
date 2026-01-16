@@ -400,11 +400,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             return TweenAnimationBuilder<double>(
               tween: Tween(begin: 0, end: 1),
               duration: Duration(milliseconds: 200 + index * 50),
-              curve: Curves.easeOutBack,
+              curve: Curves.easeOut,
               builder: (context, value, child) {
                 return Transform.translate(
                   offset: Offset(0, 20 * (1 - value)),
-                  child: Opacity(opacity: value, child: child),
+                  child: Opacity(opacity: value.clamp(0.0, 1.0), child: child),
                 );
               },
               child: _AnimatedFileCard(
