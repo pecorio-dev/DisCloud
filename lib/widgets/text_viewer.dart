@@ -21,20 +21,19 @@ class TextViewer extends StatefulWidget {
 
 class _TextViewerState extends State<TextViewer> {
   late TextEditingController _controller;
+  late String _originalContent;
   final List<String> _undoStack = [];
   final List<String> _redoStack = [];
   bool _isEditing = false;
   bool _hasChanges = false;
-  bool _wordWrap = true;
   double _fontSize = 14;
 
   @override
   void initState() {
     super.initState();
-    final content = utf8.decode(widget.data, allowMalformed: true);
-    _controller = TextEditingController(text: content);
-    _undoStack.add(content);
-    _controller.addListener(_onTextChanged);
+    _originalContent = utf8.decode(widget.data, allowMalformed: true);
+    _controller = TextEditingController(text: _originalContent);
+    _undoStack.add(_originalContent);
   }
 
   @override
@@ -43,25 +42,20 @@ class _TextViewerState extends State<TextViewer> {
     super.dispose();
   }
 
-  void _onTextChanged() {
-    if (_isEditing) {
-      final text = _controller.text;
-      if (_undoStack.isEmpty || _undoStack.last != text) {
-        _undoStack.add(text);
-        _redoStack.clear();
-        if (_undoStack.length > 100) _undoStack.removeAt(0);
-      }
-      setState(() => _hasChanges = text != utf8.decode(widget.data, allowMalformed: true));
+  void _onTextChanged(String text) {
+    if (_undoStack.isEmpty || _undoStack.last != text) {
+      _undoStack.add(text);
+      _redoStack.clear();
+      if (_undoStack.length > 100) _undoStack.removeAt(0);
     }
+    setState(() => _hasChanges = text != _originalContent);
   }
 
   void _undo() {
     if (_undoStack.length > 1) {
       _redoStack.add(_undoStack.removeLast());
-      _controller.removeListener(_onTextChanged);
       _controller.text = _undoStack.last;
-      _controller.addListener(_onTextChanged);
-      setState(() => _hasChanges = _controller.text != utf8.decode(widget.data, allowMalformed: true));
+      setState(() => _hasChanges = _controller.text != _originalContent);
     }
   }
 
@@ -69,16 +63,15 @@ class _TextViewerState extends State<TextViewer> {
     if (_redoStack.isNotEmpty) {
       final text = _redoStack.removeLast();
       _undoStack.add(text);
-      _controller.removeListener(_onTextChanged);
       _controller.text = text;
-      _controller.addListener(_onTextChanged);
-      setState(() => _hasChanges = _controller.text != utf8.decode(widget.data, allowMalformed: true));
+      setState(() => _hasChanges = _controller.text != _originalContent);
     }
   }
 
   void _save() {
     if (widget.onSave != null) {
       widget.onSave!(Uint8List.fromList(utf8.encode(_controller.text)));
+      _originalContent = _controller.text;
       setState(() => _hasChanges = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Saved!'), backgroundColor: Colors.green),
@@ -91,6 +84,7 @@ class _TextViewerState extends State<TextViewer> {
     final lines = _controller.text.split('\n').length;
     final words = _controller.text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
     final chars = _controller.text.length;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
       appBar: AppBar(
@@ -104,26 +98,14 @@ class _TextViewerState extends State<TextViewer> {
         ),
         actions: [
           if (_isEditing) ...[
-            IconButton(
-              icon: const Icon(Icons.undo),
-              onPressed: _undoStack.length > 1 ? _undo : null,
-              tooltip: 'Undo',
-            ),
-            IconButton(
-              icon: const Icon(Icons.redo),
-              onPressed: _redoStack.isNotEmpty ? _redo : null,
-              tooltip: 'Redo',
-            ),
-            IconButton(
-              icon: const Icon(Icons.save),
-              onPressed: _hasChanges && widget.onSave != null ? _save : null,
-              tooltip: 'Save',
-            ),
+            IconButton(icon: const Icon(Icons.undo), onPressed: _undoStack.length > 1 ? _undo : null, tooltip: 'Undo'),
+            IconButton(icon: const Icon(Icons.redo), onPressed: _redoStack.isNotEmpty ? _redo : null, tooltip: 'Redo'),
+            IconButton(icon: const Icon(Icons.save), onPressed: _hasChanges && widget.onSave != null ? _save : null, tooltip: 'Save'),
           ],
           IconButton(
             icon: Icon(_isEditing ? Icons.visibility : Icons.edit),
             onPressed: () => setState(() => _isEditing = !_isEditing),
-            tooltip: _isEditing ? 'View mode' : 'Edit mode',
+            tooltip: _isEditing ? 'View' : 'Edit',
           ),
           IconButton(
             icon: const Icon(Icons.copy),
@@ -131,70 +113,71 @@ class _TextViewerState extends State<TextViewer> {
               Clipboard.setData(ClipboardData(text: _controller.text));
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied!')));
             },
-            tooltip: 'Copy all',
+            tooltip: 'Copy',
           ),
           PopupMenuButton<String>(
             onSelected: (action) {
-              switch (action) {
-                case 'wrap':
-                  setState(() => _wordWrap = !_wordWrap);
-                  break;
-                case 'font_up':
-                  setState(() => _fontSize = (_fontSize + 2).clamp(10, 32));
-                  break;
-                case 'font_down':
-                  setState(() => _fontSize = (_fontSize - 2).clamp(10, 32));
-                  break;
-              }
+              if (action == 'font_up') setState(() => _fontSize = (_fontSize + 2).clamp(10, 32));
+              if (action == 'font_down') setState(() => _fontSize = (_fontSize - 2).clamp(10, 32));
             },
-            itemBuilder: (_) => [
-              PopupMenuItem(value: 'wrap', child: Row(children: [
-                Icon(_wordWrap ? Icons.check_box : Icons.check_box_outline_blank, size: 20),
-                const SizedBox(width: 8), const Text('Word wrap')
-              ])),
-              const PopupMenuItem(value: 'font_up', child: Row(children: [
-                Icon(Icons.text_increase, size: 20), SizedBox(width: 8), Text('Increase font')
-              ])),
-              const PopupMenuItem(value: 'font_down', child: Row(children: [
-                Icon(Icons.text_decrease, size: 20), SizedBox(width: 8), Text('Decrease font')
-              ])),
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'font_up', child: Row(children: [Icon(Icons.add, size: 20), SizedBox(width: 8), Text('Larger')])),
+              PopupMenuItem(value: 'font_down', child: Row(children: [Icon(Icons.remove, size: 20), SizedBox(width: 8), Text('Smaller')])),
             ],
           ),
         ],
       ),
       body: Column(
         children: [
+          // Stats bar
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            color: isDark ? Colors.grey.shade900 : Colors.grey.shade200,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                Text('$lines lines'),
-                Text('$words words'),
-                Text('$chars chars'),
+                Text('$lines lines', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
+                Text('$words words', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
+                Text('$chars chars', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
+                Text('Font: ${_fontSize.toInt()}', style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
               ],
             ),
           ),
+          // Content
           Expanded(
-            child: _isEditing
-                ? TextField(
-                    controller: _controller,
-                    maxLines: null,
-                    expands: true,
-                    style: TextStyle(fontSize: _fontSize),
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.all(16),
+            child: Container(
+              color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+              child: _isEditing
+                  ? TextField(
+                      controller: _controller,
+                      maxLines: null,
+                      expands: true,
+                      onChanged: _onTextChanged,
+                      style: TextStyle(
+                        fontSize: _fontSize,
+                        color: isDark ? Colors.white : Colors.black,
+                        fontFamily: 'monospace',
+                      ),
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.all(16),
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: SelectableText(
+                          _controller.text,
+                          style: TextStyle(
+                            fontSize: _fontSize,
+                            color: isDark ? Colors.white : Colors.black,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ),
                     ),
-                  )
-                : SingleChildScrollView(
-                    padding: const EdgeInsets.all(16),
-                    child: SelectableText(
-                      _controller.text,
-                      style: TextStyle(fontSize: _fontSize),
-                    ),
-                  ),
+            ),
           ),
         ],
       ),

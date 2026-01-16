@@ -23,53 +23,42 @@ class CodeViewer extends StatefulWidget {
 
 class _CodeViewerState extends State<CodeViewer> {
   late TextEditingController _controller;
-  late ScrollController _scrollController;
+  late String _originalContent;
   final List<String> _undoStack = [];
   final List<String> _redoStack = [];
   bool _isEditing = false;
   bool _hasChanges = false;
   double _fontSize = 14;
   bool _showLineNumbers = true;
-  String _searchQuery = '';
-  int _currentSearchIndex = 0;
-  List<int> _searchResults = [];
 
   @override
   void initState() {
     super.initState();
-    final content = utf8.decode(widget.data, allowMalformed: true);
-    _controller = TextEditingController(text: content);
-    _scrollController = ScrollController();
-    _undoStack.add(content);
-    _controller.addListener(_onTextChanged);
+    _originalContent = utf8.decode(widget.data, allowMalformed: true);
+    _controller = TextEditingController(text: _originalContent);
+    _undoStack.add(_originalContent);
   }
 
   @override
   void dispose() {
     _controller.dispose();
-    _scrollController.dispose();
     super.dispose();
   }
 
-  void _onTextChanged() {
-    if (_isEditing) {
-      final text = _controller.text;
-      if (_undoStack.isEmpty || _undoStack.last != text) {
-        _undoStack.add(text);
-        _redoStack.clear();
-        if (_undoStack.length > 100) _undoStack.removeAt(0);
-      }
-      setState(() => _hasChanges = text != utf8.decode(widget.data, allowMalformed: true));
+  void _onTextChanged(String text) {
+    if (_undoStack.isEmpty || _undoStack.last != text) {
+      _undoStack.add(text);
+      _redoStack.clear();
+      if (_undoStack.length > 100) _undoStack.removeAt(0);
     }
+    setState(() => _hasChanges = text != _originalContent);
   }
 
   void _undo() {
     if (_undoStack.length > 1) {
       _redoStack.add(_undoStack.removeLast());
-      _controller.removeListener(_onTextChanged);
       _controller.text = _undoStack.last;
-      _controller.addListener(_onTextChanged);
-      setState(() => _hasChanges = _controller.text != utf8.decode(widget.data, allowMalformed: true));
+      setState(() => _hasChanges = _controller.text != _originalContent);
     }
   }
 
@@ -77,16 +66,15 @@ class _CodeViewerState extends State<CodeViewer> {
     if (_redoStack.isNotEmpty) {
       final text = _redoStack.removeLast();
       _undoStack.add(text);
-      _controller.removeListener(_onTextChanged);
       _controller.text = text;
-      _controller.addListener(_onTextChanged);
-      setState(() => _hasChanges = _controller.text != utf8.decode(widget.data, allowMalformed: true));
+      setState(() => _hasChanges = _controller.text != _originalContent);
     }
   }
 
   void _save() {
     if (widget.onSave != null) {
       widget.onSave!(Uint8List.fromList(utf8.encode(_controller.text)));
+      _originalContent = _controller.text;
       setState(() => _hasChanges = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Saved!'), backgroundColor: Colors.green),
@@ -94,51 +82,18 @@ class _CodeViewerState extends State<CodeViewer> {
     }
   }
 
-  void _search(String query) {
-    _searchResults.clear();
-    if (query.isEmpty) {
-      setState(() {
-        _searchQuery = '';
-        _currentSearchIndex = 0;
-      });
-      return;
-    }
-
-    final text = _controller.text.toLowerCase();
-    final searchLower = query.toLowerCase();
-    int index = 0;
-    while (true) {
-      index = text.indexOf(searchLower, index);
-      if (index == -1) break;
-      _searchResults.add(index);
-      index++;
-    }
-
-    setState(() {
-      _searchQuery = query;
-      _currentSearchIndex = 0;
-    });
-
-    if (_searchResults.isNotEmpty) {
-      _goToSearchResult(0);
-    }
-  }
-
-  void _goToSearchResult(int index) {
-    if (_searchResults.isEmpty) return;
-    _currentSearchIndex = index % _searchResults.length;
-    final pos = _searchResults[_currentSearchIndex];
-    _controller.selection = TextSelection(baseOffset: pos, extentOffset: pos + _searchQuery.length);
-    setState(() {});
-  }
-
-  void _nextSearchResult() => _goToSearchResult(_currentSearchIndex + 1);
-  void _prevSearchResult() => _goToSearchResult(_currentSearchIndex - 1);
-
   @override
   Widget build(BuildContext context) {
     final lines = _controller.text.split('\n');
     final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    // Colors
+    final bgColor = isDark ? const Color(0xFF1E1E1E) : Colors.white;
+    final textColor = isDark ? Colors.white : Colors.black;
+    final lineNumBg = isDark ? const Color(0xFF252526) : Colors.grey.shade100;
+    final lineNumColor = isDark ? Colors.grey.shade500 : Colors.grey.shade600;
+    final infoBg = isDark ? Colors.grey.shade900 : Colors.grey.shade200;
+    final infoText = isDark ? Colors.white70 : Colors.black87;
 
     return Scaffold(
       appBar: AppBar(
@@ -152,202 +107,204 @@ class _CodeViewerState extends State<CodeViewer> {
         ),
         actions: [
           if (_isEditing) ...[
-            IconButton(
-              icon: const Icon(Icons.undo),
-              onPressed: _undoStack.length > 1 ? _undo : null,
-              tooltip: 'Undo (Ctrl+Z)',
-            ),
-            IconButton(
-              icon: const Icon(Icons.redo),
-              onPressed: _redoStack.isNotEmpty ? _redo : null,
-              tooltip: 'Redo (Ctrl+Y)',
-            ),
-            IconButton(
-              icon: const Icon(Icons.save),
-              onPressed: _hasChanges && widget.onSave != null ? _save : null,
-              tooltip: 'Save (Ctrl+S)',
-            ),
+            IconButton(icon: const Icon(Icons.undo), onPressed: _undoStack.length > 1 ? _undo : null, tooltip: 'Undo'),
+            IconButton(icon: const Icon(Icons.redo), onPressed: _redoStack.isNotEmpty ? _redo : null, tooltip: 'Redo'),
+            IconButton(icon: const Icon(Icons.save), onPressed: _hasChanges && widget.onSave != null ? _save : null, tooltip: 'Save'),
           ],
           IconButton(
             icon: Icon(_isEditing ? Icons.visibility : Icons.edit),
             onPressed: () => setState(() => _isEditing = !_isEditing),
-            tooltip: _isEditing ? 'View mode' : 'Edit mode',
+            tooltip: _isEditing ? 'View' : 'Edit',
           ),
           IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: _showSearchDialog,
-            tooltip: 'Search (Ctrl+F)',
+            icon: const Icon(Icons.copy),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: _controller.text));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied!')));
+            },
+            tooltip: 'Copy',
           ),
           PopupMenuButton<String>(
-            onSelected: _handleMenuAction,
+            onSelected: (action) {
+              if (action == 'lines') setState(() => _showLineNumbers = !_showLineNumbers);
+              if (action == 'font_up') setState(() => _fontSize = (_fontSize + 2).clamp(10, 32));
+              if (action == 'font_down') setState(() => _fontSize = (_fontSize - 2).clamp(10, 32));
+            },
             itemBuilder: (_) => [
-              PopupMenuItem(value: 'copy', child: Row(children: [
-                const Icon(Icons.copy, size: 20), const SizedBox(width: 8), const Text('Copy all')
-              ])),
               PopupMenuItem(value: 'lines', child: Row(children: [
                 Icon(_showLineNumbers ? Icons.check_box : Icons.check_box_outline_blank, size: 20),
                 const SizedBox(width: 8), const Text('Line numbers')
               ])),
-              const PopupMenuDivider(),
-              const PopupMenuItem(value: 'font_up', child: Row(children: [
-                Icon(Icons.text_increase, size: 20), SizedBox(width: 8), Text('Increase font')
-              ])),
-              const PopupMenuItem(value: 'font_down', child: Row(children: [
-                Icon(Icons.text_decrease, size: 20), SizedBox(width: 8), Text('Decrease font')
-              ])),
+              const PopupMenuItem(value: 'font_up', child: Row(children: [Icon(Icons.add, size: 20), SizedBox(width: 8), Text('Larger')])),
+              const PopupMenuItem(value: 'font_down', child: Row(children: [Icon(Icons.remove, size: 20), SizedBox(width: 8), Text('Smaller')])),
             ],
           ),
         ],
       ),
-      body: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.keyZ, control: true): _undo,
-          const SingleActivator(LogicalKeyboardKey.keyY, control: true): _redo,
-          const SingleActivator(LogicalKeyboardKey.keyS, control: true): _save,
-          const SingleActivator(LogicalKeyboardKey.keyF, control: true): _showSearchDialog,
-        },
-        child: Focus(
-          autofocus: true,
-          child: Column(
-            children: [
-              if (_searchQuery.isNotEmpty) _buildSearchBar(),
-              _buildInfoBar(lines.length),
-              Expanded(child: _buildEditor(lines, isDark)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSearchBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.blue.withOpacity(0.1),
-      child: Row(
+      body: Column(
         children: [
-          Text('Found ${_searchResults.length} matches'),
-          const Spacer(),
-          Text('${_currentSearchIndex + 1}/${_searchResults.length}'),
-          IconButton(icon: const Icon(Icons.arrow_upward, size: 20), onPressed: _prevSearchResult),
-          IconButton(icon: const Icon(Icons.arrow_downward, size: 20), onPressed: _nextSearchResult),
-          IconButton(
-            icon: const Icon(Icons.close, size: 20),
-            onPressed: () => _search(''),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInfoBar(int lineCount) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      child: Row(
-        children: [
-          Text('$lineCount lines', style: const TextStyle(fontSize: 12)),
-          const SizedBox(width: 16),
-          Text(widget.language.toUpperCase(), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-          const Spacer(),
-          Text('Font: ${_fontSize.toInt()}', style: const TextStyle(fontSize: 12)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildEditor(List<String> lines, bool isDark) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (_showLineNumbers)
+          // Info bar
           Container(
-            width: 50,
-            color: isDark ? Colors.grey.shade900 : Colors.grey.shade100,
-            child: ListView.builder(
-              controller: _scrollController,
-              itemCount: lines.length,
-              itemBuilder: (_, i) => Container(
-                height: _fontSize * 1.5,
-                alignment: Alignment.centerRight,
-                padding: const EdgeInsets.only(right: 8),
-                child: Text(
-                  '${i + 1}',
-                  style: TextStyle(fontSize: _fontSize - 2, color: Colors.grey, fontFamily: 'monospace'),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            color: infoBg,
+            child: Row(
+              children: [
+                Text('${lines.length} lines', style: TextStyle(fontSize: 12, color: infoText)),
+                const SizedBox(width: 16),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(color: Colors.blue.withOpacity(0.2), borderRadius: BorderRadius.circular(4)),
+                  child: Text(widget.language.toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: infoText)),
                 ),
+                const Spacer(),
+                Text('Font: ${_fontSize.toInt()}', style: TextStyle(fontSize: 12, color: infoText)),
+              ],
+            ),
+          ),
+          // Code
+          Expanded(
+            child: Container(
+              color: bgColor,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Line numbers
+                  if (_showLineNumbers)
+                    Container(
+                      width: 50,
+                      color: lineNumBg,
+                      child: ListView.builder(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        itemCount: lines.length,
+                        itemBuilder: (_, i) => Container(
+                          height: _fontSize * 1.6,
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 12),
+                          child: Text(
+                            '${i + 1}',
+                            style: TextStyle(fontSize: _fontSize - 2, color: lineNumColor, fontFamily: 'monospace'),
+                          ),
+                        ),
+                      ),
+                    ),
+                  // Code content
+                  Expanded(
+                    child: _isEditing
+                        ? TextField(
+                            controller: _controller,
+                            maxLines: null,
+                            expands: true,
+                            onChanged: _onTextChanged,
+                            style: TextStyle(
+                              fontSize: _fontSize,
+                              color: textColor,
+                              fontFamily: 'monospace',
+                              height: 1.6,
+                            ),
+                            decoration: const InputDecoration(
+                              border: InputBorder.none,
+                              contentPadding: EdgeInsets.all(8),
+                            ),
+                          )
+                        : SingleChildScrollView(
+                            padding: const EdgeInsets.all(8),
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: SelectableText.rich(
+                                TextSpan(
+                                  children: _highlightCode(_controller.text, textColor),
+                                  style: TextStyle(
+                                    fontSize: _fontSize,
+                                    fontFamily: 'monospace',
+                                    height: 1.6,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                  ),
+                ],
               ),
             ),
           ),
-        Expanded(
-          child: _isEditing
-              ? TextField(
-                  controller: _controller,
-                  maxLines: null,
-                  expands: true,
-                  style: TextStyle(fontSize: _fontSize, fontFamily: 'monospace'),
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    contentPadding: EdgeInsets.all(8),
-                  ),
-                )
-              : SingleChildScrollView(
-                  padding: const EdgeInsets.all(8),
-                  child: SelectableText(
-                    _controller.text,
-                    style: TextStyle(fontSize: _fontSize, fontFamily: 'monospace'),
-                  ),
-                ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  void _showSearchDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        final controller = TextEditingController(text: _searchQuery);
-        return AlertDialog(
-          title: const Text('Search'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(hintText: 'Enter search term'),
-            onSubmitted: (value) {
-              Navigator.pop(ctx);
-              _search(value);
-            },
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                _search(controller.text);
-              },
-              child: const Text('Search'),
-            ),
-          ],
-        );
-      },
-    );
+  List<TextSpan> _highlightCode(String code, Color defaultColor) {
+    // Simple syntax highlighting
+    final keywords = ['if', 'else', 'for', 'while', 'return', 'class', 'function', 'def', 'import', 'from', 'const', 'let', 'var', 'final', 'void', 'int', 'String', 'bool', 'true', 'false', 'null', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'super', 'extends', 'implements', 'override', 'static', 'private', 'public', 'protected'];
+    
+    final spans = <TextSpan>[];
+    final lines = code.split('\n');
+    
+    for (int i = 0; i < lines.length; i++) {
+      if (i > 0) spans.add(TextSpan(text: '\n', style: TextStyle(color: defaultColor)));
+      
+      final line = lines[i];
+      
+      // Check for comments
+      if (line.trimLeft().startsWith('//') || line.trimLeft().startsWith('#')) {
+        spans.add(TextSpan(text: line, style: const TextStyle(color: Colors.green)));
+        continue;
+      }
+      
+      // Check for strings
+      if (line.contains('"') || line.contains("'")) {
+        var remaining = line;
+        while (remaining.isNotEmpty) {
+          final doubleQuote = remaining.indexOf('"');
+          final singleQuote = remaining.indexOf("'");
+          
+          int quoteStart = -1;
+          String quoteChar = '';
+          
+          if (doubleQuote >= 0 && (singleQuote < 0 || doubleQuote < singleQuote)) {
+            quoteStart = doubleQuote;
+            quoteChar = '"';
+          } else if (singleQuote >= 0) {
+            quoteStart = singleQuote;
+            quoteChar = "'";
+          }
+          
+          if (quoteStart < 0) {
+            _addHighlightedWords(spans, remaining, keywords, defaultColor);
+            break;
+          }
+          
+          if (quoteStart > 0) {
+            _addHighlightedWords(spans, remaining.substring(0, quoteStart), keywords, defaultColor);
+          }
+          
+          final quoteEnd = remaining.indexOf(quoteChar, quoteStart + 1);
+          if (quoteEnd < 0) {
+            spans.add(TextSpan(text: remaining.substring(quoteStart), style: const TextStyle(color: Colors.orange)));
+            break;
+          }
+          
+          spans.add(TextSpan(text: remaining.substring(quoteStart, quoteEnd + 1), style: const TextStyle(color: Colors.orange)));
+          remaining = remaining.substring(quoteEnd + 1);
+        }
+        continue;
+      }
+      
+      _addHighlightedWords(spans, line, keywords, defaultColor);
+    }
+    
+    return spans;
   }
 
-  void _handleMenuAction(String action) {
-    switch (action) {
-      case 'copy':
-        Clipboard.setData(ClipboardData(text: _controller.text));
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied!')));
-        break;
-      case 'lines':
-        setState(() => _showLineNumbers = !_showLineNumbers);
-        break;
-      case 'font_up':
-        setState(() => _fontSize = (_fontSize + 2).clamp(10, 32));
-        break;
-      case 'font_down':
-        setState(() => _fontSize = (_fontSize - 2).clamp(10, 32));
-        break;
+  void _addHighlightedWords(List<TextSpan> spans, String text, List<String> keywords, Color defaultColor) {
+    final words = text.split(RegExp(r'(\s+|(?=[^\w])|(?<=[^\w]))'));
+    for (final word in words) {
+      if (keywords.contains(word)) {
+        spans.add(TextSpan(text: word, style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)));
+      } else if (RegExp(r'^\d+$').hasMatch(word)) {
+        spans.add(TextSpan(text: word, style: const TextStyle(color: Colors.purple)));
+      } else {
+        spans.add(TextSpan(text: word, style: TextStyle(color: defaultColor)));
+      }
     }
   }
 
