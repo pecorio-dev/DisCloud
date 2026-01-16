@@ -206,14 +206,17 @@ class SettingsScreen extends StatelessWidget {
                       padding: const EdgeInsets.all(16),
                       child: Column(
                         children: [
-                          Row(
-                            children: [
-                              _StorageStat(icon: Icons.folder, label: 'Folders', value: '${provider.totalFolders}', color: Colors.amber),
-                              const SizedBox(width: 16),
-                              _StorageStat(icon: Icons.insert_drive_file, label: 'Files', value: '${provider.totalFiles}', color: Colors.blue),
-                              const SizedBox(width: 16),
-                              _StorageStat(icon: Icons.storage, label: 'Size', value: _formatSize(provider.totalSize), color: Colors.green),
-                            ],
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                _StorageStat(icon: Icons.folder, label: 'Folders', value: '${provider.totalFolders}', color: Colors.amber),
+                                const SizedBox(width: 12),
+                                _StorageStat(icon: Icons.insert_drive_file, label: 'Files', value: '${provider.totalFiles}', color: Colors.blue),
+                                const SizedBox(width: 12),
+                                _StorageStat(icon: Icons.storage, label: 'Size', value: _formatSize(provider.totalSize), color: Colors.green),
+                              ],
+                            ),
                           ),
                           if (provider.webhooks.length > 1) ...[
                             const Divider(height: 24),
@@ -298,7 +301,7 @@ class SettingsScreen extends StatelessWidget {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Text('DisCloud', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                                  Text('Version 2.3', style: TextStyle(color: Colors.grey.shade600)),
+                                  Text('Version 2.5', style: TextStyle(color: Colors.grey.shade600)),
                                 ],
                               ),
                             ],
@@ -475,21 +478,20 @@ class _StorageStat extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, color: color, size: 24),
-            const SizedBox(height: 8),
-            Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-          ],
-        ),
+    return Container(
+      width: 90,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 24),
+          const SizedBox(height: 8),
+          FittedBox(child: Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+          Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+        ],
       ),
     );
   }

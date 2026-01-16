@@ -318,12 +318,12 @@ class _WebhookCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 16),
-              Row(
+              Wrap(
+                spacing: 16,
+                runSpacing: 8,
                 children: [
                   _StatItem(icon: Icons.insert_drive_file, label: 'Files', value: '${webhook.fileCount}'),
-                  const SizedBox(width: 24),
                   _StatItem(icon: Icons.storage, label: 'Size', value: webhook.formattedSize),
-                  const SizedBox(width: 24),
                   _StatItem(
                     icon: Icons.calendar_today,
                     label: 'Added',

@@ -88,13 +88,18 @@ class _ShareScreenState extends State<ShareScreen> with SingleTickerProviderStat
                   ),
                 );
               },
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _StatCard(icon: Icons.file_copy, label: 'Files', value: '${widget.files.length}'),
-                  _StatCard(icon: Icons.storage, label: 'Size', value: _formatSize(totalSize)),
-                  _StatCard(icon: Icons.layers, label: 'Chunks', value: '$totalChunks'),
-                ],
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _StatCard(icon: Icons.file_copy, label: 'Files', value: '${widget.files.length}'),
+                    const SizedBox(width: 8),
+                    _StatCard(icon: Icons.storage, label: 'Size', value: _formatSize(totalSize)),
+                    const SizedBox(width: 8),
+                    _StatCard(icon: Icons.layers, label: 'Chunks', value: '$totalChunks'),
+                  ],
+                ),
               ),
             ),
 

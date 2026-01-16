@@ -322,8 +322,9 @@ class _DownloadTaskCard extends StatelessWidget {
               const SizedBox(height: 12),
               _AnimatedProgressBar(progress: task.progress),
               const SizedBox(height: 4),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              Wrap(
+                spacing: 16,
+                alignment: WrapAlignment.spaceBetween,
                 children: [
                   Text('${(task.progress * 100).toInt()}%', style: const TextStyle(fontSize: 12)),
                   if (task.status == DownloadStatus.downloading) ...[
