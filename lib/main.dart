@@ -2,9 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/cloud_provider.dart';
 import 'providers/theme_provider.dart';
-import 'providers/webhook_provider.dart';
-import 'services/auto_sync_service.dart';
-import 'services/download_manager.dart';
 import 'screens/setup_screen.dart';
 import 'screens/home_screen.dart';
 
@@ -21,14 +18,11 @@ class DiscordCloudApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => CloudProvider()..init()),
         ChangeNotifierProvider(create: (_) => ThemeProvider()..init()),
-        ChangeNotifierProvider(create: (_) => WebhookProvider()..init()),
-        ChangeNotifierProvider(create: (_) => AutoSyncService()..init()),
-        ChangeNotifierProvider(create: (_) => DownloadManager()),
       ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProvider, _) {
           return MaterialApp(
-            title: 'Discord Cloud',
+            title: 'DisCloud',
             debugShowCheckedModeBanner: false,
             theme: ThemeProvider.lightTheme,
             darkTheme: ThemeProvider.darkTheme,
@@ -67,10 +61,7 @@ class MainWrapper extends StatelessWidget {
                   const SizedBox(height: 24),
                   const CircularProgressIndicator(),
                   const SizedBox(height: 16),
-                  Text(
-                    'Loading...',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
+                  const Text('Loading...'),
                 ],
               ),
             ),

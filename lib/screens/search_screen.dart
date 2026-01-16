@@ -218,7 +218,7 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Future<void> _searchInFileContent(CloudFile file, String query, CloudProvider provider) async {
-    if (file.chunkIds.isEmpty) return;
+    if (file.chunkUrls.isEmpty) return;
 
     try {
       final data = await provider.downloadFile(file);

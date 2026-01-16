@@ -6,9 +6,10 @@ class CloudFile {
   final int size;
   final DateTime createdAt;
   final DateTime modifiedAt;
-  final List<String> chunkIds; // Legacy: single webhook URLs
-  final Map<String, List<String>> webhookChunks; // Multi-webhook: webhookUrl -> chunk URLs
+  final List<String> chunkUrls;
+  final List<String> messageIds; // Pour pouvoir supprimer de Discord
   final String? mimeType;
+  final bool isCompressed;
 
   CloudFile({
     required this.id,
@@ -18,58 +19,49 @@ class CloudFile {
     this.size = 0,
     DateTime? createdAt,
     DateTime? modifiedAt,
-    this.chunkIds = const [],
-    this.webhookChunks = const {},
+    this.chunkUrls = const [],
+    this.messageIds = const [],
     this.mimeType,
+    this.isCompressed = false,
   })  : createdAt = createdAt ?? DateTime.now(),
         modifiedAt = modifiedAt ?? DateTime.now();
-  
-  /// Retourne true si le fichier a des URLs multi-webhook
-  bool get hasMultiWebhook => webhookChunks.isNotEmpty;
-  
-  /// Nombre de webhooks qui ont ce fichier
-  int get webhookCount => webhookChunks.length;
+
+  int get chunkCount => chunkUrls.length;
 
   factory CloudFile.fromJson(Map<String, dynamic> json) {
-    // Parse webhookChunks
-    Map<String, List<String>> webhookChunks = {};
-    if (json['webhookChunks'] != null) {
-      final Map<String, dynamic> chunks = json['webhookChunks'];
-      chunks.forEach((key, value) {
-        webhookChunks[key] = List<String>.from(value);
-      });
-    }
-    
     return CloudFile(
-      id: json['id'] ?? '',
-      name: json['name'] ?? '',
-      path: json['path'] ?? '',
-      isDirectory: json['isDirectory'] ?? false,
-      size: json['size'] ?? 0,
-      createdAt: json['createdAt'] != null
-          ? DateTime.parse(json['createdAt'])
-          : DateTime.now(),
-      modifiedAt: json['modifiedAt'] != null
-          ? DateTime.parse(json['modifiedAt'])
-          : DateTime.now(),
-      chunkIds: List<String>.from(json['chunkIds'] ?? []),
-      webhookChunks: webhookChunks,
-      mimeType: json['mimeType'],
+      id: json['i'] ?? json['id'] ?? '',
+      name: json['n'] ?? json['name'] ?? '',
+      path: json['p'] ?? json['path'] ?? '',
+      isDirectory: json['d'] ?? json['isDirectory'] ?? false,
+      size: json['s'] ?? json['size'] ?? 0,
+      createdAt: json['c'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['c'])
+          : (json['createdAt'] != null ? DateTime.parse(json['createdAt']) : DateTime.now()),
+      modifiedAt: json['m'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['m'])
+          : (json['modifiedAt'] != null ? DateTime.parse(json['modifiedAt']) : DateTime.now()),
+      chunkUrls: List<String>.from(json['u'] ?? json['chunkUrls'] ?? json['chunkIds'] ?? []),
+      messageIds: List<String>.from(json['msg'] ?? json['messageIds'] ?? []),
+      mimeType: json['t'] ?? json['mimeType'],
+      isCompressed: json['z'] ?? json['isCompressed'] ?? false,
     );
   }
 
+  // Format compact pour l'index Discord (moins de place)
   Map<String, dynamic> toJson() {
     return {
-      'id': id,
-      'name': name,
-      'path': path,
-      'isDirectory': isDirectory,
-      'size': size,
-      'createdAt': createdAt.toIso8601String(),
-      'modifiedAt': modifiedAt.toIso8601String(),
-      'chunkIds': chunkIds,
-      'webhookChunks': webhookChunks,
-      'mimeType': mimeType,
+      'i': id,
+      'n': name,
+      'p': path,
+      'd': isDirectory,
+      's': size,
+      'c': createdAt.millisecondsSinceEpoch,
+      'm': modifiedAt.millisecondsSinceEpoch,
+      'u': chunkUrls,
+      'msg': messageIds,
+      't': mimeType,
+      'z': isCompressed,
     };
   }
 
@@ -81,9 +73,10 @@ class CloudFile {
     int? size,
     DateTime? createdAt,
     DateTime? modifiedAt,
-    List<String>? chunkIds,
-    Map<String, List<String>>? webhookChunks,
+    List<String>? chunkUrls,
+    List<String>? messageIds,
     String? mimeType,
+    bool? isCompressed,
   }) {
     return CloudFile(
       id: id ?? this.id,
@@ -93,9 +86,10 @@ class CloudFile {
       size: size ?? this.size,
       createdAt: createdAt ?? this.createdAt,
       modifiedAt: modifiedAt ?? this.modifiedAt,
-      chunkIds: chunkIds ?? this.chunkIds,
-      webhookChunks: webhookChunks ?? this.webhookChunks,
+      chunkUrls: chunkUrls ?? this.chunkUrls,
+      messageIds: messageIds ?? this.messageIds,
       mimeType: mimeType ?? this.mimeType,
+      isCompressed: isCompressed ?? this.isCompressed,
     );
   }
 
@@ -107,9 +101,7 @@ class CloudFile {
   String get formattedSize {
     if (size < 1024) return '$size B';
     if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KB';
-    if (size < 1024 * 1024 * 1024) {
-      return '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
+    if (size < 1024 * 1024 * 1024) return '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
     return '${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 }

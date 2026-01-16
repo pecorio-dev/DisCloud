@@ -1,19 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:async';
 import 'package:dio/dio.dart';
-import 'package:uuid/uuid.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart';
 
-// Fonctions isolees pour compute()
 Uint8List _compressIsolate(Uint8List data) {
   try {
     final compressed = gzip.encode(data);
-    if (compressed.length < data.length) {
-      return Uint8List.fromList(compressed);
-    }
+    if (compressed.length < data.length) return Uint8List.fromList(compressed);
   } catch (e) {}
   return data;
 }
@@ -51,16 +45,25 @@ Uint8List _mergeChunksIsolate(List<Uint8List> chunks) {
   return result;
 }
 
+class UploadResult {
+  final List<String> urls;
+  final List<String> messageIds;
+  final bool isCompressed;
+  
+  UploadResult({
+    required this.urls,
+    required this.messageIds,
+    required this.isCompressed,
+  });
+}
+
 class DiscordService {
   final String webhookUrl;
   final Dio _dio;
-  int _maxChunkSize = 9 * 1024 * 1024;
-  bool _enableCompression = true;
+  static const int maxChunkSize = 9 * 1024 * 1024; // 9MB toujours
   static const int _maxRetries = 3;
   static const Duration _retryDelay = Duration(seconds: 2);
-  static const Duration _minChunkDelay = Duration(milliseconds: 500);
-
-  int get maxChunkSize => _maxChunkSize;
+  static const Duration _chunkDelay = Duration(milliseconds: 600);
 
   DiscordService({required this.webhookUrl})
       : _dio = Dio(BaseOptions(
@@ -75,20 +78,9 @@ class DiscordService {
     return parts.length >= 2 ? parts[parts.length - 2] : '';
   }
 
-  Future<void> loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final hasNitro = prefs.getBool('hasNitro') ?? false;
-    _enableCompression = prefs.getBool('enableCompression') ?? true;
-    _maxChunkSize = hasNitro ? 95 * 1024 * 1024 : 9 * 1024 * 1024;
-  }
-
-  Future<Uint8List> _compress(Uint8List data) async {
-    if (!_enableCompression || data.length < 1024) return data;
-    return compute(_compressIsolate, data);
-  }
-
-  Future<Uint8List> _decompress(Uint8List data) async {
-    return compute(_decompressIsolate, data);
+  String get webhookToken {
+    final uri = Uri.parse(webhookUrl);
+    return uri.pathSegments.isNotEmpty ? uri.pathSegments.last : '';
   }
 
   Future<bool> validateWebhook() async {
@@ -103,201 +95,210 @@ class DiscordService {
   Future<Map<String, dynamic>?> getWebhookInfo() async {
     try {
       final response = await _dio.get(webhookUrl);
-      if (response.statusCode == 200) {
-        return response.data as Map<String, dynamic>;
-      }
+      if (response.statusCode == 200) return response.data as Map<String, dynamic>;
     } catch (e) {}
     return null;
   }
 
-  Future<List<String>> uploadFile(
+  /// Upload un fichier et retourne URLs + message IDs
+  Future<UploadResult> uploadFile(
     Uint8List fileData,
     String fileName, {
     Function(double)? onProgress,
     CancelToken? cancelToken,
   }) async {
-    // Compression en arriere-plan
-    final compressedData = await _compress(fileData);
+    // Compression
+    final compressed = await compute(_compressIsolate, fileData);
+    final isCompressed = compressed.length < fileData.length;
+    final dataToUpload = isCompressed ? compressed : fileData;
     
-    // Split en arriere-plan
+    // Split
     final chunks = await compute(_splitChunksIsolate, {
-      'data': compressedData,
-      'maxSize': _maxChunkSize,
+      'data': dataToUpload,
+      'maxSize': maxChunkSize,
     });
     
-    final List<String> attachmentUrls = [];
-    final uuid = const Uuid();
+    final List<String> urls = [];
+    final List<String> messageIds = [];
 
     for (int i = 0; i < chunks.length; i++) {
-      if (cancelToken?.isCancelled == true) {
-        throw Exception('Upload cancelled');
-      }
+      if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
 
       final chunk = chunks[i];
-      final chunkName = '${uuid.v4()}_${i}_$fileName';
-
-      String? attachmentUrl;
+      String? url;
+      String? msgId;
       int retries = 0;
 
-      while (attachmentUrl == null && retries < _maxRetries) {
+      while (url == null && retries < _maxRetries) {
         try {
           final formData = FormData.fromMap({
-            'file': MultipartFile.fromBytes(chunk, filename: chunkName),
-            'content': jsonEncode({
-              'type': 'discloud_chunk',
-              'index': i,
-              'total': chunks.length,
-              'originalName': fileName,
-            }),
+            'file': MultipartFile.fromBytes(chunk, filename: '${i}_$fileName'),
           });
 
           final response = await _dio.post(
-            webhookUrl,
+            '$webhookUrl?wait=true', // wait=true pour avoir l'ID du message
             data: formData,
             cancelToken: cancelToken,
             onSendProgress: (sent, total) {
               if (onProgress != null && total > 0) {
-                final chunkProgress = sent / total;
-                final overallProgress = (i + chunkProgress) / chunks.length;
-                onProgress(overallProgress);
+                onProgress((i + sent / total) / chunks.length);
               }
             },
           );
 
-          if (response.statusCode == 200 || response.statusCode == 204) {
+          if (response.statusCode == 200) {
             final data = response.data;
             if (data is Map<String, dynamic>) {
+              msgId = data['id']?.toString();
               final attachments = data['attachments'] as List<dynamic>?;
               if (attachments != null && attachments.isNotEmpty) {
-                final url = attachments[0]['url'];
-                if (url != null && url is String && url.isNotEmpty) {
-                  attachmentUrl = url;
-                }
+                url = attachments[0]['url']?.toString();
               }
             }
           }
 
-          if (attachmentUrl == null) {
-            retries++;
-            if (retries < _maxRetries) {
-              await Future.delayed(_retryDelay);
-            }
-          }
-        } on DioException catch (e) {
-          if (e.type == DioExceptionType.cancel) rethrow;
-          
-          retries++;
-          if (e.response?.statusCode == 429) {
-            final retryAfter = e.response?.headers.value('retry-after');
-            final waitTime = int.tryParse(retryAfter ?? '5') ?? 5;
-            await Future.delayed(Duration(seconds: waitTime + 1));
-          } else if (retries < _maxRetries) {
-            await Future.delayed(_retryDelay * retries);
-          } else {
-            throw Exception('Upload chunk $i failed after $_maxRetries retries');
-          }
-        } catch (e) {
-          retries++;
-          if (retries >= _maxRetries) {
-            throw Exception('Upload chunk $i failed: $e');
-          }
-          await Future.delayed(_retryDelay);
-        }
-      }
-
-      if (attachmentUrl == null) {
-        throw Exception('No URL for chunk $i after $_maxRetries attempts');
-      }
-
-      attachmentUrls.add(attachmentUrl);
-      
-      // Petit delai entre chunks pour eviter rate limit
-      if (i < chunks.length - 1) {
-        await Future.delayed(_minChunkDelay);
-      }
-    }
-
-    if (attachmentUrls.length != chunks.length) {
-      throw Exception('Incomplete: ${attachmentUrls.length}/${chunks.length} chunks');
-    }
-
-    return attachmentUrls;
-  }
-
-  Future<Uint8List> downloadFile(
-    List<String> attachmentUrls, {
-    Function(double)? onProgress,
-    CancelToken? cancelToken,
-  }) async {
-    final List<Uint8List> chunks = [];
-
-    for (int i = 0; i < attachmentUrls.length; i++) {
-      if (cancelToken?.isCancelled == true) {
-        throw Exception('Download cancelled');
-      }
-
-      Uint8List? chunkData;
-      int retries = 0;
-
-      while (chunkData == null && retries < _maxRetries) {
-        try {
-          final response = await _dio.get<List<int>>(
-            attachmentUrls[i],
-            options: Options(responseType: ResponseType.bytes),
-            cancelToken: cancelToken,
-            onReceiveProgress: (received, total) {
-              if (onProgress != null && total > 0) {
-                final chunkProgress = received / total;
-                final overallProgress = (i + chunkProgress) / attachmentUrls.length;
-                onProgress(overallProgress);
-              }
-            },
-          );
-
-          if (response.data != null && response.data!.isNotEmpty) {
-            chunkData = Uint8List.fromList(response.data!);
-          } else {
+          if (url == null) {
             retries++;
             if (retries < _maxRetries) await Future.delayed(_retryDelay);
           }
         } on DioException catch (e) {
           if (e.type == DioExceptionType.cancel) rethrow;
-          
           retries++;
-          if (e.response?.statusCode == 404) {
-            throw Exception('Chunk $i not found (deleted from Discord)');
+          if (e.response?.statusCode == 429) {
+            final wait = int.tryParse(e.response?.headers.value('retry-after') ?? '5') ?? 5;
+            await Future.delayed(Duration(seconds: wait + 1));
+          } else if (retries < _maxRetries) {
+            await Future.delayed(_retryDelay * retries);
+          } else {
+            throw Exception('Chunk $i failed');
           }
-          if (retries >= _maxRetries) {
-            throw Exception('Download chunk $i failed after $_maxRetries retries');
-          }
-          await Future.delayed(_retryDelay * retries);
-        } catch (e) {
-          retries++;
-          if (retries >= _maxRetries) {
-            throw Exception('Download chunk $i failed: $e');
-          }
-          await Future.delayed(_retryDelay);
         }
       }
 
-      if (chunkData == null) {
-        throw Exception('No data for chunk $i after $_maxRetries attempts');
-      }
-
-      chunks.add(chunkData);
+      if (url == null) throw Exception('No URL for chunk $i');
+      
+      urls.add(url);
+      if (msgId != null) messageIds.add(msgId);
+      
+      if (i < chunks.length - 1) await Future.delayed(_chunkDelay);
     }
 
-    // Merge en arriere-plan
-    final merged = await compute(_mergeChunksIsolate, chunks);
-    return await _decompress(merged);
+    return UploadResult(urls: urls, messageIds: messageIds, isCompressed: isCompressed);
   }
 
-  Future<bool> sendMessage(String content) async {
-    try {
-      final response = await _dio.post(webhookUrl, data: {'content': content});
-      return response.statusCode == 200 || response.statusCode == 204;
-    } catch (e) {
-      return false;
+  /// Telecharge un fichier depuis ses URLs
+  Future<Uint8List> downloadFile(
+    List<String> urls, {
+    bool isCompressed = false,
+    Function(double)? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    final List<Uint8List> chunks = [];
+
+    for (int i = 0; i < urls.length; i++) {
+      if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
+
+      Uint8List? data;
+      int retries = 0;
+
+      while (data == null && retries < _maxRetries) {
+        try {
+          final response = await _dio.get<List<int>>(
+            urls[i],
+            options: Options(responseType: ResponseType.bytes),
+            cancelToken: cancelToken,
+            onReceiveProgress: (recv, total) {
+              if (onProgress != null && total > 0) {
+                onProgress((i + recv / total) / urls.length);
+              }
+            },
+          );
+          if (response.data != null && response.data!.isNotEmpty) {
+            data = Uint8List.fromList(response.data!);
+          }
+        } on DioException catch (e) {
+          if (e.type == DioExceptionType.cancel) rethrow;
+          if (e.response?.statusCode == 404) throw Exception('File deleted from Discord');
+          retries++;
+          if (retries >= _maxRetries) throw Exception('Download chunk $i failed');
+          await Future.delayed(_retryDelay * retries);
+        }
+      }
+      if (data == null) throw Exception('No data for chunk $i');
+      chunks.add(data);
     }
+
+    final merged = await compute(_mergeChunksIsolate, chunks);
+    return isCompressed ? await compute(_decompressIsolate, merged) : merged;
+  }
+
+  /// Supprime des messages Discord par leurs IDs
+  Future<int> deleteMessages(List<String> messageIds) async {
+    int deleted = 0;
+    for (final msgId in messageIds) {
+      try {
+        final response = await _dio.delete('$webhookUrl/messages/$msgId');
+        if (response.statusCode == 204 || response.statusCode == 200) deleted++;
+        await Future.delayed(const Duration(milliseconds: 300)); // Rate limit
+      } catch (e) {
+        debugPrint('Failed to delete message $msgId: $e');
+      }
+    }
+    return deleted;
+  }
+
+  /// Envoie un message texte (pour l'index)
+  Future<String?> sendMessage(String content, {String? filename, Uint8List? fileData}) async {
+    try {
+      final Map<String, dynamic> data = {};
+      
+      if (fileData != null && filename != null) {
+        final formData = FormData.fromMap({
+          'file': MultipartFile.fromBytes(fileData, filename: filename),
+          if (content.isNotEmpty) 'content': content,
+        });
+        final response = await _dio.post('$webhookUrl?wait=true', data: formData);
+        if (response.statusCode == 200) return response.data['id']?.toString();
+      } else {
+        data['content'] = content;
+        final response = await _dio.post('$webhookUrl?wait=true', data: data);
+        if (response.statusCode == 200) return response.data['id']?.toString();
+      }
+    } catch (e) {
+      debugPrint('sendMessage error: $e');
+    }
+    return null;
+  }
+
+  /// Edite un message existant
+  Future<bool> editMessage(String messageId, {String? content, Uint8List? fileData, String? filename}) async {
+    try {
+      if (fileData != null && filename != null) {
+        final formData = FormData.fromMap({
+          'file': MultipartFile.fromBytes(fileData, filename: filename),
+          if (content != null) 'content': content,
+        });
+        final response = await _dio.patch('$webhookUrl/messages/$messageId', data: formData);
+        return response.statusCode == 200;
+      } else {
+        final response = await _dio.patch(
+          '$webhookUrl/messages/$messageId',
+          data: {'content': content},
+        );
+        return response.statusCode == 200;
+      }
+    } catch (e) {
+      debugPrint('editMessage error: $e');
+    }
+    return false;
+  }
+
+  /// Recupere un message par son ID
+  Future<Map<String, dynamic>?> getMessage(String messageId) async {
+    try {
+      final response = await _dio.get('$webhookUrl/messages/$messageId');
+      if (response.statusCode == 200) return response.data;
+    } catch (e) {}
+    return null;
   }
 }
