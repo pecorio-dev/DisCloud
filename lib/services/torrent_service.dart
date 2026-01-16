@@ -97,20 +97,26 @@ class TorrentService extends ChangeNotifier {
     debugPrint('aria2 path: $aria2Executable');
 
     try {
-      // Tuer tout process aria2c existant sur le port 6800
+      // Tuer tout process aria2c existant
       if (Platform.isWindows) {
         try {
-          await Process.run('taskkill', ['/F', '/IM', 'aria2c.exe'], runInShell: true);
-          debugPrint('Killed existing aria2c processes');
-          await Future.delayed(const Duration(milliseconds: 500));
+          final killResult = await Process.run('taskkill', ['/F', '/IM', 'aria2c.exe'], runInShell: true);
+          debugPrint('Killed existing aria2c processes: ${killResult.exitCode}');
         } catch (_) {}
+        // Attendre que le port soit libere
+        await Future.delayed(const Duration(milliseconds: 1000));
+      } else {
+        try {
+          await Process.run('pkill', ['-9', 'aria2c']);
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 500));
       }
 
       // Verifier si le fichier existe (si chemin absolu)
       if (aria2Executable != 'aria2c') {
         final file = File(aria2Executable);
         if (!await file.exists()) {
-          debugPrint('aria2c file does not exist at: $aria2Executable');
+          debugPrint('ERROR: aria2c file does not exist at: $aria2Executable');
           return false;
         }
         debugPrint('aria2c file exists: ${await file.length()} bytes');
@@ -124,15 +130,13 @@ class TorrentService extends ChangeNotifier {
         runInShell: Platform.isWindows,
       );
       
-      debugPrint('aria2c test exit code: ${testResult.exitCode}');
-      debugPrint('aria2c test stdout: ${testResult.stdout.toString().split('\n').first}');
-      
       if (testResult.exitCode != 0) {
-        debugPrint('aria2c test failed, stderr: ${testResult.stderr}');
+        debugPrint('ERROR: aria2c test failed, stderr: ${testResult.stderr}');
         return false;
       }
       
-      debugPrint('aria2c found: ${testResult.stdout.toString().split('\n').first}');
+      final versionLine = testResult.stdout.toString().split('\n').first;
+      debugPrint('aria2c found: $versionLine');
 
       // Creer le dossier de telechargement
       final tempDir = await getTemporaryDirectory();
@@ -142,11 +146,13 @@ class TorrentService extends ChangeNotifier {
       }
       debugPrint('Download dir: ${downloadDir.path}');
 
-      // Demarrer aria2c en mode RPC
-      _aria2Secret = DateTime.now().millisecondsSinceEpoch.toString();
+      // Generer un secret simple
+      _aria2Secret = 'discloud${DateTime.now().millisecondsSinceEpoch}';
+      _aria2RpcUrl = 'http://127.0.0.1:6800/jsonrpc';
       
       final args = [
-        '--enable-rpc',
+        '--enable-rpc=true',
+        '--rpc-listen-all=false',
         '--rpc-listen-port=6800',
         '--rpc-secret=$_aria2Secret',
         '--rpc-allow-origin-all=true',
@@ -158,9 +164,11 @@ class TorrentService extends ChangeNotifier {
         '--bt-enable-lpd=false',
         '--bt-max-peers=50',
         '--check-certificate=false',
+        '--console-log-level=notice',
       ];
       
-      debugPrint('Starting aria2c with args: $args');
+      debugPrint('Starting aria2c...');
+      debugPrint('Secret: $_aria2Secret');
       
       _aria2Process = await Process.start(
         aria2Executable,
@@ -168,43 +176,58 @@ class TorrentService extends ChangeNotifier {
         runInShell: Platform.isWindows,
       );
       
-      // Ecouter les erreurs du process
+      debugPrint('aria2c process started with PID: ${_aria2Process!.pid}');
+      
+      // Collecter les logs
+      final stderrBuffer = StringBuffer();
+      final stdoutBuffer = StringBuffer();
+      
       _aria2Process!.stderr.listen((data) {
-        debugPrint('aria2c stderr: ${String.fromCharCodes(data)}');
+        final msg = String.fromCharCodes(data).trim();
+        if (msg.isNotEmpty) {
+          stderrBuffer.writeln(msg);
+          debugPrint('aria2c stderr: $msg');
+        }
       });
       
       _aria2Process!.stdout.listen((data) {
-        debugPrint('aria2c stdout: ${String.fromCharCodes(data)}');
+        final msg = String.fromCharCodes(data).trim();
+        if (msg.isNotEmpty) {
+          stdoutBuffer.writeln(msg);
+          debugPrint('aria2c stdout: $msg');
+        }
       });
 
-      _aria2RpcUrl = 'http://localhost:6800/jsonrpc';
-      
       // Attendre que aria2 demarre (avec retry)
-      debugPrint('Waiting for aria2 RPC...');
-      for (int i = 0; i < 5; i++) {
-        await Future.delayed(const Duration(seconds: 1));
+      debugPrint('Waiting for aria2 RPC on $_aria2RpcUrl ...');
+      for (int i = 0; i < 10; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
         
-        final version = await _rpcCall('aria2.getVersion');
-        if (version != null) {
-          _isRunning = true;
-          _startUpdateTimer();
-          notifyListeners();
-          debugPrint('aria2c started successfully: ${version['version']}');
-          return true;
+        try {
+          final version = await _rpcCall('aria2.getVersion');
+          if (version != null) {
+            _isRunning = true;
+            _startUpdateTimer();
+            notifyListeners();
+            debugPrint('SUCCESS: aria2c started: ${version['version']}');
+            return true;
+          }
+        } catch (e) {
+          debugPrint('RPC attempt ${i + 1}/10 error: $e');
         }
-        debugPrint('RPC attempt ${i + 1}/5 failed, retrying...');
       }
       
-      // Verifier si le process est toujours en vie
-      if (_aria2Process != null) {
-        final exitCode = _aria2Process!.exitCode;
-        debugPrint('aria2 process may have exited. Checking...');
-      }
+      // Echec - afficher les logs collectes
+      debugPrint('FAILED to connect to aria2 RPC after 10 attempts');
+      debugPrint('Collected stderr: ${stderrBuffer.toString()}');
+      debugPrint('Collected stdout: ${stdoutBuffer.toString()}');
       
-      debugPrint('Failed to connect to aria2 RPC after 5 attempts');
+      // Tuer le process si toujours en cours
+      _aria2Process?.kill();
+      _aria2Process = null;
       
     } catch (e, stack) {
-      debugPrint('Failed to start aria2c: $e');
+      debugPrint('EXCEPTION starting aria2c: $e');
       debugPrint('Stack: $stack');
     }
 
@@ -420,6 +443,11 @@ class TorrentService extends ChangeNotifier {
   }
 
   Future<dynamic> _rpcCall(String method, [List<dynamic>? params]) async {
+    if (_aria2RpcUrl == null || _aria2Secret == null) {
+      debugPrint('RPC call failed: not initialized');
+      return null;
+    }
+    
     try {
       final body = {
         'jsonrpc': '2.0',
@@ -431,7 +459,11 @@ class TorrentService extends ChangeNotifier {
       final response = await _dio.post(
         _aria2RpcUrl!,
         data: jsonEncode(body),
-        options: Options(contentType: 'application/json'),
+        options: Options(
+          contentType: 'application/json',
+          receiveTimeout: const Duration(seconds: 5),
+          sendTimeout: const Duration(seconds: 5),
+        ),
       );
 
       if (response.data['result'] != null) {
@@ -441,7 +473,10 @@ class TorrentService extends ChangeNotifier {
         debugPrint('RPC error: ${response.data['error']}');
       }
     } catch (e) {
-      debugPrint('RPC call failed: $e');
+      // Ne pas spammer les logs pendant le demarrage
+      if (_isRunning) {
+        debugPrint('RPC call failed: $e');
+      }
     }
     return null;
   }
