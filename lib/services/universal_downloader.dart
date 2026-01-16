@@ -272,98 +272,264 @@ class UniversalDownloader extends ChangeNotifier {
   }
 
   Future<List<ExtractedVideo>> _extractWithYtDlp(String url) async {
+    debugPrint('=== Extracting with yt-dlp ===');
+    debugPrint('URL: $url');
+    debugPrint('yt-dlp path: $_ytDlpPath');
+    
     try {
+      // Verifier que yt-dlp existe
+      final ytdlpFile = File(_ytDlpPath!);
+      if (!await ytdlpFile.exists() && _ytDlpPath != 'yt-dlp') {
+        debugPrint('yt-dlp file not found at $_ytDlpPath');
+        return [];
+      }
+
       final result = await Process.run(
         _ytDlpPath!,
-        ['-j', '--no-playlist', url],
+        [
+          '-j',                    // Output JSON
+          '--no-playlist',         // Single video only
+          '--no-warnings',         // Suppress warnings
+          '--no-check-certificate', // Skip SSL verification
+          '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          url,
+        ],
+        runInShell: true,
       );
 
-      if (result.exitCode == 0) {
-        final json = jsonDecode(result.stdout as String);
+      debugPrint('yt-dlp exit code: ${result.exitCode}');
+      debugPrint('yt-dlp stdout length: ${result.stdout.toString().length}');
+      
+      if (result.stderr.toString().isNotEmpty) {
+        debugPrint('yt-dlp stderr: ${result.stderr}');
+      }
+
+      if (result.exitCode == 0 && result.stdout.toString().trim().isNotEmpty) {
+        final jsonStr = result.stdout.toString().trim();
+        debugPrint('Parsing JSON response...');
+        
+        final json = jsonDecode(jsonStr);
         final formats = <ExtractedVideo>[];
 
         final title = json['title'] ?? 'video';
         final thumbnail = json['thumbnail'];
         final duration = json['duration'];
+        
+        debugPrint('Video title: $title');
 
         // Ajouter les formats disponibles
         if (json['formats'] != null) {
+          debugPrint('Found ${(json['formats'] as List).length} formats');
+          
           for (final fmt in json['formats']) {
-            if (fmt['vcodec'] != 'none' || fmt['acodec'] != 'none') {
-              final height = fmt['height'];
-              final ext = fmt['ext'] ?? 'mp4';
-              final filesize = fmt['filesize'] ?? fmt['filesize_approx'];
-              
-              formats.add(ExtractedVideo(
-                title: title,
-                url: fmt['url'] ?? '',
-                thumbnailUrl: thumbnail,
-                duration: duration,
-                fileSize: filesize,
-                quality: height != null ? '${height}p' : (fmt['format_note'] ?? 'unknown'),
-                format: ext,
-                headers: Map<String, String>.from(fmt['http_headers'] ?? {}),
-              ));
-            }
+            final vcodec = fmt['vcodec']?.toString() ?? 'none';
+            final acodec = fmt['acodec']?.toString() ?? 'none';
+            final fmtUrl = fmt['url']?.toString() ?? '';
+            
+            // Ignorer les formats sans URL ou sans codec
+            if (fmtUrl.isEmpty) continue;
+            if (vcodec == 'none' && acodec == 'none') continue;
+            
+            final height = fmt['height'];
+            final ext = fmt['ext'] ?? 'mp4';
+            final filesize = fmt['filesize'] ?? fmt['filesize_approx'];
+            
+            formats.add(ExtractedVideo(
+              title: title,
+              url: fmtUrl,
+              thumbnailUrl: thumbnail,
+              duration: duration is int ? duration : null,
+              fileSize: filesize is int ? filesize : null,
+              quality: height != null ? '${height}p' : (fmt['format_note']?.toString() ?? 'unknown'),
+              format: ext.toString(),
+              headers: fmt['http_headers'] != null 
+                  ? Map<String, String>.from(fmt['http_headers']) 
+                  : {},
+            ));
           }
         }
 
-        // Si pas de formats, utiliser l'URL directe
+        // Si pas de formats mais URL directe disponible
         if (formats.isEmpty && json['url'] != null) {
+          debugPrint('Using direct URL');
           formats.add(ExtractedVideo(
             title: title,
             url: json['url'],
             thumbnailUrl: thumbnail,
-            duration: duration,
+            duration: duration is int ? duration : null,
             quality: 'best',
-            format: json['ext'] ?? 'mp4',
+            format: json['ext']?.toString() ?? 'mp4',
           ));
         }
 
-        // Trier par qualite
-        formats.sort((a, b) {
-          final aNum = int.tryParse(a.quality.replaceAll('p', '')) ?? 0;
-          final bNum = int.tryParse(b.quality.replaceAll('p', '')) ?? 0;
+        // Filtrer les doublons et URLs invalides
+        final uniqueFormats = <String, ExtractedVideo>{};
+        for (final fmt in formats) {
+          if (fmt.url.startsWith('http')) {
+            final key = '${fmt.quality}_${fmt.format}';
+            if (!uniqueFormats.containsKey(key)) {
+              uniqueFormats[key] = fmt;
+            }
+          }
+        }
+
+        // Trier par qualite (highest first)
+        final sortedFormats = uniqueFormats.values.toList();
+        sortedFormats.sort((a, b) {
+          final aNum = int.tryParse(a.quality.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+          final bNum = int.tryParse(b.quality.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
           return bNum.compareTo(aNum);
         });
 
-        return formats;
+        debugPrint('Returning ${sortedFormats.length} formats');
+        return sortedFormats;
+      } else {
+        debugPrint('yt-dlp failed or returned empty');
+        debugPrint('Exit code: ${result.exitCode}');
+        debugPrint('Stdout: ${result.stdout}');
+        debugPrint('Stderr: ${result.stderr}');
       }
-    } catch (e) {
-      debugPrint('yt-dlp extraction failed: $e');
+    } catch (e, stack) {
+      debugPrint('yt-dlp extraction error: $e');
+      debugPrint('Stack: $stack');
     }
     
-    return [];
+    // Si yt-dlp echoue, essayer l'extraction manuelle
+    debugPrint('Trying manual extraction...');
+    return _extractManually(url);
+  }
+
+  /// Telecharge une video avec yt-dlp directement (sans extraire d'abord)
+  Future<File?> downloadVideoWithYtDlp(
+    String url, {
+    String? quality,
+    Function(double)? onProgress,
+    CancelToken? cancelToken,
+  }) async {
+    if (!_ytDlpAvailable || _ytDlpPath == null) {
+      debugPrint('yt-dlp not available for direct download');
+      return null;
+    }
+
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final outputPath = '${tempDir.path}${Platform.pathSeparator}discloud_%(title)s.%(ext)s';
+      
+      debugPrint('Downloading with yt-dlp to: $outputPath');
+      
+      final args = [
+        '-o', outputPath,
+        '--no-playlist',
+        '--no-check-certificate',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        '--progress',
+        '--newline',
+      ];
+      
+      // Ajouter la qualite si specifiee
+      if (quality != null && quality.contains('p')) {
+        final height = quality.replaceAll(RegExp(r'[^0-9]'), '');
+        args.addAll(['-f', 'bestvideo[height<=$height]+bestaudio/best[height<=$height]/best']);
+      } else {
+        args.addAll(['-f', 'best']);
+      }
+      
+      args.add(url);
+      
+      final process = await Process.start(_ytDlpPath!, args, runInShell: true);
+      
+      String? downloadedFile;
+      
+      await for (final line in process.stdout.transform(const SystemEncoding().decoder)) {
+        debugPrint('yt-dlp: $line');
+        
+        // Parser la progression
+        if (line.contains('%')) {
+          final match = RegExp(r'(\d+\.?\d*)%').firstMatch(line);
+          if (match != null) {
+            final progress = double.tryParse(match.group(1)!) ?? 0;
+            onProgress?.call(progress / 100);
+          }
+        }
+        
+        // Detecter le fichier telecharge
+        if (line.contains('[download] Destination:')) {
+          downloadedFile = line.split('Destination:').last.trim();
+        }
+        if (line.contains('has already been downloaded')) {
+          downloadedFile = line.split('"')[1];
+        }
+        if (line.contains('[Merger]')) {
+          final match = RegExp(r'Merging formats into "([^"]+)"').firstMatch(line);
+          if (match != null) downloadedFile = match.group(1);
+        }
+      }
+      
+      await process.exitCode;
+      
+      // Trouver le fichier telecharge
+      if (downloadedFile != null && await File(downloadedFile).exists()) {
+        return File(downloadedFile);
+      }
+      
+      // Chercher dans le dossier temp
+      final files = await tempDir.list().where((f) => f.path.contains('discloud_')).toList();
+      if (files.isNotEmpty) {
+        return File(files.first.path);
+      }
+      
+    } catch (e) {
+      debugPrint('yt-dlp download error: $e');
+    }
+    
+    return null;
   }
 
   Future<List<ExtractedVideo>> _extractManually(String url) async {
     // Extraction manuelle pour certains sites sans yt-dlp
+    debugPrint('Manual extraction for: $url');
+    
     try {
-      final response = await _dio.get(url);
+      final response = await _dio.get(
+        url,
+        options: Options(
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': url,
+          },
+        ),
+      );
       final html = response.data.toString();
+      debugPrint('Page loaded, ${html.length} chars');
       
       // Chercher des patterns de video
       final videoUrls = <String>[];
       
-      // Pattern pour les sources video directes (mp4, m3u8, webm)
-      final mp4Pattern = RegExp(r'https?://[^\s"<>]+\.mp4[^\s"<>]*', caseSensitive: false);
-      final m3u8Pattern = RegExp(r'https?://[^\s"<>]+\.m3u8[^\s"<>]*', caseSensitive: false);
-      final webmPattern = RegExp(r'https?://[^\s"<>]+\.webm[^\s"<>]*', caseSensitive: false);
+      // Pattern simple pour les URLs video
+      final urlPattern = RegExp(r'https?://[^\s"<>]+\.(mp4|m3u8|webm)[^\s"<>]*', caseSensitive: false);
       
-      for (final match in mp4Pattern.allMatches(html)) {
-        videoUrls.add(match.group(0)!);
+      for (final match in urlPattern.allMatches(html)) {
+        var u = match.group(0)!;
+        // Nettoyer les caracteres d'echappement
+        u = u.replaceAll(r'\/', '/').replaceAll(r'\"', '');
+        // Couper aux caracteres invalides
+        for (final c in ['"', "'", ' ', ')', '<', '>']) {
+          final idx = u.indexOf(c);
+          if (idx > 0) u = u.substring(0, idx);
+        }
+        
+        if (u.startsWith('http') && !videoUrls.contains(u)) {
+          videoUrls.add(u);
+        }
       }
-      for (final match in m3u8Pattern.allMatches(html)) {
-        videoUrls.add(match.group(0)!);
-      }
-      for (final match in webmPattern.allMatches(html)) {
-        videoUrls.add(match.group(0)!);
-      }
+      
+      debugPrint('Found ${videoUrls.length} video URLs manually');
 
       return videoUrls.map((u) => ExtractedVideo(
         title: Uri.parse(url).host,
         url: u,
-        quality: 'unknown',
+        quality: u.contains('1080') ? '1080p' : (u.contains('720') ? '720p' : 'unknown'),
+        format: u.contains('.m3u8') ? 'm3u8' : (u.contains('.webm') ? 'webm' : 'mp4'),
       )).toList();
 
     } catch (e) {
