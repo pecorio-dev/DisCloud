@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../providers/cloud_provider.dart';
 import '../services/universal_downloader.dart';
 import '../services/torrent_service.dart';
+import '../services/dependency_manager.dart';
 
 class DownloadCenterScreen extends StatefulWidget {
   const DownloadCenterScreen({super.key});
@@ -17,23 +18,32 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
   late TabController _tabController;
   final UniversalDownloader _downloader = UniversalDownloader();
   final TorrentService _torrentService = TorrentService();
+  final DependencyManager _depManager = DependencyManager();
   
   final _urlController = TextEditingController();
   final _batchController = TextEditingController();
   
   bool _isExtracting = false;
   bool _isDownloading = false;
+  bool _isInstallingDeps = false;
   double _progress = 0;
   String? _status;
   List<ExtractedVideo>? _extractedVideos;
   String? _error;
+  String? _installingDep;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
-    _downloader.init();
+    _tabController = TabController(length: 5, vsync: this);
+    _initDeps();
     _torrentService.addListener(() => setState(() {}));
+    _depManager.addListener(() => setState(() {}));
+  }
+
+  Future<void> _initDeps() async {
+    await _depManager.init();
+    _downloader.init();
   }
 
   @override
@@ -51,14 +61,19 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
     return Scaffold(
       appBar: AppBar(
         title: const Text('Download Center'),
+        actions: [
+          // Indicateur de statut des dependances
+          _buildDependencyStatusIcon(),
+        ],
         bottom: TabBar(
           controller: _tabController,
           isScrollable: true,
           tabs: const [
-            Tab(icon: Icon(Icons.link), text: 'Direct URL'),
+            Tab(icon: Icon(Icons.link), text: 'Direct'),
             Tab(icon: Icon(Icons.video_library), text: 'Video'),
             Tab(icon: Icon(Icons.cloud_download), text: 'Torrent'),
             Tab(icon: Icon(Icons.list), text: 'Batch'),
+            Tab(icon: Icon(Icons.settings), text: 'Tools'),
           ],
         ),
       ),
@@ -69,9 +84,226 @@ class _DownloadCenterScreenState extends State<DownloadCenterScreen> with Ticker
           _buildVideoTab(),
           _buildTorrentTab(),
           _buildBatchTab(),
+          _buildToolsTab(),
         ],
       ),
     );
+  }
+
+  Widget _buildDependencyStatusIcon() {
+    final allInstalled = _depManager.aria2.status == DependencyStatus.installed &&
+                         _depManager.ytDlp.status == DependencyStatus.installed;
+    final hasUpdates = _depManager.aria2.needsUpdate || _depManager.ytDlp.needsUpdate;
+    
+    return IconButton(
+      icon: Icon(
+        allInstalled 
+            ? (hasUpdates ? Icons.system_update : Icons.check_circle)
+            : Icons.warning,
+        color: allInstalled 
+            ? (hasUpdates ? Colors.orange : Colors.green)
+            : Colors.red,
+      ),
+      tooltip: allInstalled 
+          ? (hasUpdates ? 'Updates available' : 'All tools installed')
+          : 'Missing tools',
+      onPressed: () => _tabController.animateTo(4),
+    );
+  }
+
+  Widget _buildToolsTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Download Tools', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text('Required tools for advanced downloads', style: TextStyle(color: Colors.grey)),
+          const SizedBox(height: 24),
+          
+          // aria2
+          _DependencyCard(
+            info: _depManager.aria2,
+            description: 'High-speed download utility for torrents and parallel downloads',
+            isInstalling: _isInstallingDeps && _installingDep == 'aria2',
+            progress: _isInstallingDeps && _installingDep == 'aria2' ? _progress : null,
+            onInstall: () => _installDependency('aria2'),
+            onUpdate: _depManager.aria2.needsUpdate ? () => _installDependency('aria2') : null,
+          ),
+          
+          const SizedBox(height: 16),
+          
+          // yt-dlp
+          _DependencyCard(
+            info: _depManager.ytDlp,
+            description: 'Video downloader supporting 1000+ sites (YouTube, Vimeo, etc.)',
+            isInstalling: _isInstallingDeps && _installingDep == 'yt-dlp',
+            progress: _isInstallingDeps && _installingDep == 'yt-dlp' ? _progress : null,
+            onInstall: () => _installDependency('yt-dlp'),
+            onUpdate: _depManager.ytDlp.needsUpdate ? () => _installDependency('yt-dlp') : null,
+          ),
+          
+          const SizedBox(height: 24),
+          
+          // Install all button
+          if (_depManager.aria2.status != DependencyStatus.installed ||
+              _depManager.ytDlp.status != DependencyStatus.installed)
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _isInstallingDeps ? null : _installAllDependencies,
+                icon: const Icon(Icons.download),
+                label: const Text('Install All Missing Tools'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.all(16),
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          
+          // Update all button
+          if (_depManager.aria2.needsUpdate || _depManager.ytDlp.needsUpdate)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _isInstallingDeps ? null : _updateAllDependencies,
+                  icon: const Icon(Icons.system_update),
+                  label: const Text('Update All'),
+                  style: OutlinedButton.styleFrom(padding: const EdgeInsets.all(16)),
+                ),
+              ),
+            ),
+          
+          const SizedBox(height: 24),
+          
+          // Refresh button
+          Center(
+            child: TextButton.icon(
+              onPressed: _isInstallingDeps ? null : () => _depManager.checkAll(),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Check for Updates'),
+            ),
+          ),
+          
+          const SizedBox(height: 32),
+          
+          // Info card
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.blue.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.blue.withOpacity(0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: const [
+                    Icon(Icons.info, color: Colors.blue),
+                    SizedBox(width: 8),
+                    Text('About Tools', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '• aria2 enables torrent downloads and parallel file downloads\n'
+                  '• yt-dlp extracts video URLs from YouTube, Vimeo, TikTok, and 1000+ sites\n'
+                  '• Tools are downloaded from official GitHub releases\n'
+                  '• Installed in app data folder (no admin required)',
+                  style: TextStyle(fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _installDependency(String name) async {
+    setState(() {
+      _isInstallingDeps = true;
+      _installingDep = name;
+      _progress = 0;
+    });
+
+    bool success;
+    if (name == 'aria2') {
+      success = await _depManager.installAria2(
+        onProgress: (p) => setState(() => _progress = p),
+      );
+    } else {
+      success = await _depManager.installYtDlp(
+        onProgress: (p) => setState(() => _progress = p),
+      );
+    }
+
+    setState(() {
+      _isInstallingDeps = false;
+      _installingDep = null;
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(success ? '$name installed successfully!' : 'Failed to install $name'),
+          backgroundColor: success ? Colors.green : Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _installAllDependencies() async {
+    setState(() {
+      _isInstallingDeps = true;
+    });
+
+    await _depManager.installAll(
+      onProgress: (name, p) => setState(() {
+        _installingDep = name;
+        _progress = p;
+      }),
+    );
+
+    setState(() {
+      _isInstallingDeps = false;
+      _installingDep = null;
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('All tools installed!'), backgroundColor: Colors.green),
+      );
+    }
+  }
+
+  Future<void> _updateAllDependencies() async {
+    setState(() {
+      _isInstallingDeps = true;
+    });
+
+    await _depManager.updateAll(
+      onProgress: (name, p) => setState(() {
+        _installingDep = name;
+        _progress = p;
+      }),
+    );
+
+    setState(() {
+      _isInstallingDeps = false;
+      _installingDep = null;
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('All tools updated!'), backgroundColor: Colors.green),
+      );
+    }
   }
 
   Widget _buildDirectTab() {
@@ -837,5 +1069,171 @@ class _TorrentCard extends StatelessWidget {
         IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: onRemove, tooltip: 'Remove'),
       ],
     );
+  }
+}
+
+class _DependencyCard extends StatelessWidget {
+  final DependencyInfo info;
+  final String description;
+  final bool isInstalling;
+  final double? progress;
+  final VoidCallback onInstall;
+  final VoidCallback? onUpdate;
+
+  const _DependencyCard({
+    required this.info,
+    required this.description,
+    required this.isInstalling,
+    this.progress,
+    required this.onInstall,
+    this.onUpdate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isInstalled = info.status == DependencyStatus.installed;
+    
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _buildStatusIcon(),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(info.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                          if (isInstalled && info.version != null) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.green.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text('v${info.version}', style: const TextStyle(fontSize: 11, color: Colors.green)),
+                            ),
+                          ],
+                          if (info.needsUpdate) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text('${info.latestVersion} available', style: const TextStyle(fontSize: 11, color: Colors.orange)),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(description, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                    ],
+                  ),
+                ),
+                _buildActionButton(),
+              ],
+            ),
+            if (isInstalling && progress != null) ...[
+              const SizedBox(height: 16),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 6,
+                  backgroundColor: Colors.grey.shade200,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text('${(progress! * 100).toInt()}%', style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+            ],
+            if (info.error != null) ...[
+              const SizedBox(height: 8),
+              Text(info.error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+            ],
+            if (info.lastChecked != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Last checked: ${info.lastChecked!.day}/${info.lastChecked!.month} ${info.lastChecked!.hour}:${info.lastChecked!.minute.toString().padLeft(2, '0')}',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusIcon() {
+    IconData icon;
+    Color color;
+    
+    switch (info.status) {
+      case DependencyStatus.installed:
+        icon = Icons.check_circle;
+        color = Colors.green;
+        break;
+      case DependencyStatus.notInstalled:
+        icon = Icons.download;
+        color = Colors.grey;
+        break;
+      case DependencyStatus.updating:
+        icon = Icons.sync;
+        color = Colors.blue;
+        break;
+      case DependencyStatus.error:
+        icon = Icons.error;
+        color = Colors.red;
+        break;
+    }
+    
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(icon, color: color, size: 28),
+    );
+  }
+
+  Widget _buildActionButton() {
+    if (isInstalling) {
+      return const SizedBox(
+        width: 24,
+        height: 24,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    
+    if (info.status == DependencyStatus.notInstalled) {
+      return ElevatedButton.icon(
+        onPressed: onInstall,
+        icon: const Icon(Icons.download, size: 18),
+        label: const Text('Install'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.green,
+          foregroundColor: Colors.white,
+        ),
+      );
+    }
+    
+    if (info.needsUpdate && onUpdate != null) {
+      return OutlinedButton.icon(
+        onPressed: onUpdate,
+        icon: const Icon(Icons.system_update, size: 18),
+        label: const Text('Update'),
+      );
+    }
+    
+    return const Icon(Icons.check, color: Colors.green);
   }
 }
