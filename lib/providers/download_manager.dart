@@ -163,6 +163,10 @@ class DownloadManager extends ChangeNotifier {
     final index = _tasks.indexWhere((t) => t.id == task.id);
     if (index < 0) return;
 
+    // Initialiser les progressions de chunks
+    final initialChunkSizes = List.generate(task.urls.length, (_) => 0);
+    task.initChunkProgresses(initialChunkSizes);
+    
     _tasks[index] = task.copyWith(status: DownloadStatus.downloading);
     notifyListeners();
 
@@ -177,17 +181,16 @@ class DownloadManager extends ChangeNotifier {
       for (int i = task.currentChunk; i < task.urls.length; i++) {
         if (cancelToken.isCancelled) break;
 
-        final chunkStartTime = DateTime.now();
-        int chunkDownloaded = 0;
-
         final response = await _dio.get<List<int>>(
           task.urls[i],
           options: Options(responseType: ResponseType.bytes),
           cancelToken: cancelToken,
           onReceiveProgress: (received, total) {
-            chunkDownloaded = received;
             final elapsed = DateTime.now().difference(startTime).inMilliseconds / 1000;
             final speed = elapsed > 0 ? (totalDownloaded + received) / elapsed : 0;
+            
+            // Mettre a jour le progress du chunk actuel
+            _tasks[index].updateChunkProgress(i, received, total > 0 ? total : received);
             
             _tasks[index] = _tasks[index].copyWith(
               progress: (i + received / (total > 0 ? total : 1)) / task.urls.length.toDouble(),
@@ -202,6 +205,10 @@ class DownloadManager extends ChangeNotifier {
         if (response.data != null) {
           chunks.add(Uint8List.fromList(response.data!));
           totalDownloaded += response.data!.length;
+          
+          // Marquer le chunk comme complete
+          _tasks[index].markChunkCompleted(i);
+          notifyListeners();
         }
       }
 

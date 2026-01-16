@@ -1721,20 +1721,31 @@ class _DownloadTaskCard extends StatelessWidget {
             ),
             if (task.status == DownloadStatus.downloading || task.status == DownloadStatus.queued) ...[
               const SizedBox(height: 12),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: task.progress,
-                  minHeight: 6,
-                  backgroundColor: Colors.grey.shade200,
-                  valueColor: AlwaysStoppedAnimation(Color.lerp(Colors.blue, Colors.green, task.progress)!),
+              
+              // Si plusieurs chunks, afficher mini-barres
+              if (task.chunkCount > 1 && task.chunkProgresses.isNotEmpty) ...[
+                _buildChunkProgressBars(),
+                const SizedBox(height: 8),
+              ] else ...[
+                // Barre unique pour fichiers simples
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: task.progress,
+                    minHeight: 6,
+                    backgroundColor: Colors.grey.shade200,
+                    valueColor: AlwaysStoppedAnimation(Color.lerp(Colors.blue, Colors.green, task.progress)!),
+                  ),
                 ),
-              ),
+              ],
+              
               const SizedBox(height: 4),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text('${(task.progress * 100).toInt()}%', style: const TextStyle(fontSize: 12)),
+                  if (task.chunkCount > 1)
+                    Text('${task.completedChunks}/${task.chunkCount} chunks', style: const TextStyle(fontSize: 12, color: Colors.blue)),
                   if (task.status == DownloadStatus.downloading) ...[
                     Text(task.formattedSpeed, style: const TextStyle(fontSize: 12)),
                     Text('ETA: ${task.formattedETA}', style: const TextStyle(fontSize: 12)),
@@ -1750,6 +1761,57 @@ class _DownloadTaskCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  /// Construit les mini-barres de progression pour chaque chunk
+  Widget _buildChunkProgressBars() {
+    final chunks = task.chunkProgresses;
+    final maxPerRow = 8; // Max chunks par ligne
+    
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final barWidth = (constraints.maxWidth - (maxPerRow - 1) * 2) / maxPerRow;
+        
+        return Wrap(
+          spacing: 2,
+          runSpacing: 4,
+          children: chunks.map((chunk) {
+            Color barColor;
+            if (chunk.completed) {
+              barColor = Colors.green;
+            } else if (chunk.failed) {
+              barColor = Colors.red;
+            } else if (chunk.progress > 0) {
+              barColor = Colors.blue;
+            } else {
+              barColor = Colors.grey.shade300;
+            }
+            
+            return Tooltip(
+              message: 'Chunk ${chunk.index + 1}: ${(chunk.progress * 100).toInt()}%',
+              child: Container(
+                width: barWidth.clamp(20.0, 50.0),
+                height: 8,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(4),
+                  color: Colors.grey.shade200,
+                ),
+                child: FractionallySizedBox(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: chunk.progress.clamp(0.0, 1.0),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(4),
+                      color: barColor,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
     );
   }
 

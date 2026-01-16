@@ -132,9 +132,9 @@ class CloudProvider extends ChangeNotifier {
   
   String? get encryptionKey => settings['encryptionKey'] as String?;
 
-  int get totalFiles => _currentIndex.files.values.where((f) => !f.isDirectory).length;
+  int get totalFiles => _currentIndex.files.values.where((f) => !f.isDirectory && !f.isChunkFile).length;
   int get totalFolders => _currentIndex.files.values.where((f) => f.isDirectory).length;
-  int get totalSize => _currentIndex.files.values.fold(0, (sum, f) => sum + f.size);
+  int get totalSize => _currentIndex.files.values.where((f) => !f.isChunkFile).fold(0, (sum, f) => sum + f.size);
 
   Future<void> init() async {
     await _loadWebhooksFromLocal();
@@ -498,6 +498,8 @@ class CloudProvider extends ChangeNotifier {
   void _refreshCurrentDirectory() {
     _currentFiles = _currentIndex.files.values.where((f) {
       if (f.path == '/') return false;
+      // Masquer les fichiers chunks (appartiennent a un fichier index)
+      if (f.isChunkFile) return false;
       final parentPath = _getParentPath(f.path);
       return parentPath == _currentPath;
     }).toList();

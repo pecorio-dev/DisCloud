@@ -2,6 +2,45 @@ import 'dart:typed_data';
 
 enum DownloadStatus { queued, downloading, paused, completed, failed, cancelled }
 
+/// Progress d'un chunk individuel
+class ChunkProgress {
+  final int index;
+  final int size;
+  int downloadedBytes;
+  double progress;
+  bool completed;
+  bool failed;
+  String? error;
+
+  ChunkProgress({
+    required this.index,
+    required this.size,
+    this.downloadedBytes = 0,
+    this.progress = 0,
+    this.completed = false,
+    this.failed = false,
+    this.error,
+  });
+
+  ChunkProgress copyWith({
+    int? downloadedBytes,
+    double? progress,
+    bool? completed,
+    bool? failed,
+    String? error,
+  }) {
+    return ChunkProgress(
+      index: index,
+      size: size,
+      downloadedBytes: downloadedBytes ?? this.downloadedBytes,
+      progress: progress ?? this.progress,
+      completed: completed ?? this.completed,
+      failed: failed ?? this.failed,
+      error: error ?? this.error,
+    );
+  }
+}
+
 class DownloadTask {
   final String id;
   final String name;
@@ -21,6 +60,9 @@ class DownloadTask {
   Uint8List? data;
   DateTime? completedAt;
   double speed; // bytes per second
+  
+  // Progress par chunk
+  List<ChunkProgress> chunkProgresses;
 
   DownloadTask({
     required this.id,
@@ -40,9 +82,57 @@ class DownloadTask {
     this.data,
     this.completedAt,
     this.speed = 0,
-  }) : createdAt = createdAt ?? DateTime.now();
+    List<ChunkProgress>? chunkProgresses,
+  }) : createdAt = createdAt ?? DateTime.now(),
+       chunkProgresses = chunkProgresses ?? [];
 
   int get chunkCount => urls.length;
+  
+  /// Initialise les progres de chunks si pas encore fait
+  void initChunkProgresses(List<int> chunkSizes) {
+    if (chunkProgresses.isEmpty) {
+      chunkProgresses = List.generate(
+        chunkSizes.length, 
+        (i) => ChunkProgress(index: i, size: chunkSizes[i]),
+      );
+    }
+  }
+  
+  /// Met a jour le progress d'un chunk
+  void updateChunkProgress(int index, int downloaded, int total) {
+    if (index < chunkProgresses.length) {
+      chunkProgresses[index] = chunkProgresses[index].copyWith(
+        downloadedBytes: downloaded,
+        progress: total > 0 ? downloaded / total : 0,
+      );
+    }
+  }
+  
+  /// Marque un chunk comme complete
+  void markChunkCompleted(int index) {
+    if (index < chunkProgresses.length) {
+      chunkProgresses[index] = chunkProgresses[index].copyWith(
+        completed: true,
+        progress: 1.0,
+      );
+    }
+  }
+  
+  /// Marque un chunk comme echoue
+  void markChunkFailed(int index, String error) {
+    if (index < chunkProgresses.length) {
+      chunkProgresses[index] = chunkProgresses[index].copyWith(
+        failed: true,
+        error: error,
+      );
+    }
+  }
+  
+  /// Nombre de chunks completes
+  int get completedChunks => chunkProgresses.where((c) => c.completed).length;
+  
+  /// Nombre de chunks en echec
+  int get failedChunks => chunkProgresses.where((c) => c.failed).length;
   
   String get formattedSize {
     if (size < 1024) return '$size B';
@@ -77,6 +167,7 @@ class DownloadTask {
     Uint8List? data,
     DateTime? completedAt,
     double? speed,
+    List<ChunkProgress>? chunkProgresses,
   }) {
     return DownloadTask(
       id: id,
@@ -96,6 +187,7 @@ class DownloadTask {
       data: data ?? this.data,
       completedAt: completedAt ?? this.completedAt,
       speed: speed ?? this.speed,
+      chunkProgresses: chunkProgresses ?? this.chunkProgresses,
     );
   }
 }

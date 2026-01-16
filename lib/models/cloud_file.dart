@@ -12,7 +12,10 @@ class CloudFile {
   final bool isCompressed;
   final String webhookId;
   final String? checksum;
-  final Map<String, dynamic> metadata; // Pour stocker les options d'encryption/obfuscation
+  final Map<String, dynamic> metadata;
+  final bool needsIndex;     // Fichier multi-chunk necessitant un index
+  final String? indexFileId; // ID du fichier index parent (pour les chunks)
+  final List<int> chunkSizes; // Taille de chaque chunk (pour progress)
 
   CloudFile({
     required this.id,
@@ -29,6 +32,9 @@ class CloudFile {
     this.webhookId = '',
     this.checksum,
     this.metadata = const {},
+    this.needsIndex = false,
+    this.indexFileId,
+    this.chunkSizes = const [],
   })  : createdAt = createdAt ?? DateTime.now(),
         modifiedAt = modifiedAt ?? DateTime.now();
 
@@ -38,6 +44,9 @@ class CloudFile {
   bool get hasObfuscation => metadata['contentObfuscation'] != null || metadata['filenameObfuscation'] != null;
   String? get originalFilename => metadata['originalFilename'] as String?;
   String? get compressionRatio => metadata['compressionRatio'] as String?;
+  
+  /// Retourne true si ce fichier est un chunk appartenant a un fichier index
+  bool get isChunkFile => indexFileId != null;
 
   factory CloudFile.fromJson(Map<String, dynamic> json) {
     return CloudFile(
@@ -59,6 +68,9 @@ class CloudFile {
       webhookId: json['w'] ?? json['webhookId'] ?? '',
       checksum: json['h'] ?? json['checksum'],
       metadata: Map<String, dynamic>.from(json['meta'] ?? json['metadata'] ?? {}),
+      needsIndex: json['nidx'] ?? json['needsIndex'] ?? false,
+      indexFileId: json['idxf'] ?? json['indexFileId'],
+      chunkSizes: List<int>.from(json['csz'] ?? json['chunkSizes'] ?? []),
     );
   }
 
@@ -78,6 +90,9 @@ class CloudFile {
       'w': webhookId,
       if (checksum != null) 'h': checksum,
       if (metadata.isNotEmpty) 'meta': metadata,
+      if (needsIndex) 'nidx': needsIndex,
+      if (indexFileId != null) 'idxf': indexFileId,
+      if (chunkSizes.isNotEmpty) 'csz': chunkSizes,
     };
   }
 
@@ -96,6 +111,9 @@ class CloudFile {
     String? webhookId,
     String? checksum,
     Map<String, dynamic>? metadata,
+    bool? needsIndex,
+    String? indexFileId,
+    List<int>? chunkSizes,
   }) {
     return CloudFile(
       id: id ?? this.id,
@@ -112,6 +130,9 @@ class CloudFile {
       webhookId: webhookId ?? this.webhookId,
       checksum: checksum ?? this.checksum,
       metadata: metadata ?? this.metadata,
+      needsIndex: needsIndex ?? this.needsIndex,
+      indexFileId: indexFileId ?? this.indexFileId,
+      chunkSizes: chunkSizes ?? this.chunkSizes,
     );
   }
 
